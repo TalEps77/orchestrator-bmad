@@ -85,6 +85,13 @@ sonnet: create story 4.3 from the PRD
 fable: plan the epic-5 architecture split
 ```
 
+**This applies at every depth.** A subagent may spawn subagents of its own, and
+when it does it chooses their models from the same table — it is not restricted
+to the model it happens to be running. Say so explicitly in the task, because a
+subagent inherits nothing: one that doesn't know it may escalate to `opus` for an
+adversarial review, or drop to `sonnet` for a grep, will run its whole subtree at
+its own tier and label none of it.
+
 ## Session flow
 
 1. **Clarify first.** Ask all your questions up front, before work starts. Once
@@ -113,6 +120,9 @@ A subagent starts with none of your context. Give it, every time:
   file itself) and what to return: a precise summary, never a transcript.
 - **Boundaries** — what it must not touch, and whether it may commit or deploy
   (default: no).
+- **Propagation** — if it spawns subagents of its own, it passes these same rules
+  down: model picked per task, task description starting with that model name,
+  and this same brief structure. The rule repeats at the next depth.
 
 ## Reporting
 

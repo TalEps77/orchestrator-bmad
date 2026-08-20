@@ -71,6 +71,11 @@ fable: plan the epic-5 architecture split
 
 An unlabeled agent is an unauditable agent.
 
+This holds at every depth. A subagent that spawns its own subagents picks *their*
+models from the same table — it is not stuck at its own tier — and labels their
+tasks the same way. Subagents inherit nothing, so the rule has to travel in the
+task brief.
+
 ---
 
 ## How a session runs
