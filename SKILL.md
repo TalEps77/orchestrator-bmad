@@ -70,6 +70,14 @@ is either done, or entered in a skip ledger with a one-line reason. There is no
 third option, and "the task didn't seem to need it" is a reason — an unrecorded
 skip is not.
 
+**The installed BMAD is authoritative, not this table.** The table below is a
+snapshot of BMAD 6.8 naming; the project's own
+`_bmad/_config/bmad-help.csv` defines which workflows exist and which are
+required for *its* installed version (names shift across versions — 6.11
+renamed `bmad-create-architecture` → `bmad-architecture` and replaced
+`bmad-dev-story` with `bmad-build`). `gate.py status` reads that CSV at
+runtime, so trust its output over this table on any conflict.
+
 | Phase | Step | | Rule |
 |---|---|---|---|
 | 0 brownfield | `bmad-generate-project-context` | | Mandatory when the repo pre-exists and has no `project-context.md`. Add `bmad-document-project` if the repo is undocumented. Do this in wave 0 — otherwise every later agent re-discovers the repo. |
@@ -104,8 +112,14 @@ The ledger lives in a file and a script maintains it — never hand-edit it:
 /opt/homebrew/bin/python3 ~/.claude/skills/orchestrator-bmad/gate.py status
 ```
 
-- `gate.py status` — run at every phase boundary; required gates are checked
-  against artifacts on disk, not against your memory of having run them.
+- `gate.py status` — run at every phase boundary; required gates are derived
+  from the project's installed `bmad-help.csv` and checked against artifacts on
+  disk, not against your memory of having run them. Version-agnostic: renamed
+  workflows and changed required-sets are picked up automatically.
+- `gate.py doctor` — run once per session start and after any
+  `npx bmad-method install`: verifies the manifests parse, every required
+  workflow is mapped, all spawn types have shims, and warns when the BMAD
+  version changed under an existing ledger.
 - `gate.py check <gate> [slug]` — precondition check before spawning
   (`readiness`, `story <slug>`, `story-validated <slug>`, `code-review <slug>`).
 - `gate.py skip <step> --reason '...'` — record a deliberate skip.

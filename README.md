@@ -63,10 +63,11 @@ Phase work is spawned on **typed BMAD subagents** (`bmad-agent-dev`, `bmad-agent
 
 An audit of nine real orchestrator runs found the "invoke your skill first" rule held in **one**. Prose doesn't survive long sessions; scripts do. Two pieces ship with the skill:
 
-**`gate.py` — the phase-gate ledger.** Maintains `_bmad-output/gate-ledger.yaml` per project. Required BMAD gates (PRD, architecture, epics, readiness, sprint plan) are verified against **artifacts on disk**, not against the model's memory of having run them.
+**`gate.py` — the phase-gate ledger.** Maintains `gate-ledger.yaml` in the project's BMAD output folder. Required gates are **derived at runtime from the project's own install** (`_bmad/_config/bmad-help.csv`) and verified against **artifacts on disk**, not against the model's memory of having run them. Renamed workflows and changed required-sets across BMAD versions (6.6 → 6.11 tested) are picked up automatically; hardcoded 6.8 conventions remain only as a fallback.
 
 ```bash
-python3 gate.py status                      # phase-boundary check: done / skipped / MISSING
+python3 gate.py status                      # gates from the installed bmad-help.csv: done / skipped / MISSING
+python3 gate.py doctor                      # manifests parse? workflows mapped? shims present? version drift?
 python3 gate.py check story-validated 2-4   # precondition before spawning dev
 python3 gate.py skip readiness --reason '…' # deliberate skip, recorded
 python3 gate.py waive epic-batch-dev --reason '…'   # user-granted waiver
@@ -76,7 +77,7 @@ python3 gate.py decide party-mode skip --reason '…' # judgment on an optional
 **`hooks/bmad-agent-gate.py` — a PreToolUse hook** on the Agent tool. Registered in `~/.claude/settings.json`, it physically blocks two spawns in any `_bmad` project:
 
 1. BMAD phase work on a `general-purpose`/`Explore` agent → blocked, suggests the typed agent.
-2. `bmad-dev-story` with no story file on disk and no recorded waiver → blocked.
+2. A dev-workflow spawn (`bmad-dev-story` / 6.11's `bmad-build`) with no story file on disk and no recorded waiver → blocked.
 
 Exit 2 stops the spawn and feeds the reason back to the model. Fail-open on internal errors — enforcement is best-effort, the work is not. Non-BMAD projects fast-exit at zero cost.
 

@@ -1,5 +1,20 @@
 # orchestrator-bmad v2 — What Changed and How It Works
-**Updated:** 2026-08-21 · twin of `skill-overview.html`
+**Updated:** 2026-08-21 (v2.1: version-agnostic) · twin of `skill-overview.html`
+
+## v2.1 — version-agnostic enforcement
+
+v2 hardcoded BMAD 6.8 conventions. A machine survey found **four BMAD versions live at once** (6.6 / 6.8 / 6.10 / 6.11 across 9 projects), and 6.11 had already renamed workflows (`bmad-create-architecture` → `bmad-architecture`, `bmad-dev-story` → `bmad-build`, phases `plan`/`ship`) and changed the required set (readiness and PRD no longer marked required). v2.1 derives everything at runtime from the project's own install:
+
+| What | Derived from | Fallback |
+|---|---|---|
+| Which workflows are required | `_bmad/_config/bmad-help.csv` (`required` column) | hardcoded 6.8 list |
+| Phase-work skill names for the hook | `_bmad/_config/skill-manifest.csv` + classifier regex | curated 6.6–6.11 set |
+| Artifact directories | `_bmad/*/config.yaml` (`planning_artifacts`, `implementation_artifacts`, `output_folder`, with `{project-root}` resolution) | `_bmad-output/...` |
+| Installed version | `_bmad/_config/manifest.yaml` | "unknown" |
+
+New command — **`gate.py doctor`**: verifies the manifests parse, every required workflow is mapped (unknown ones fall back to a generic outputs-keyword check and are flagged), every spawn type referenced under `_bmad/` has a shim in `~/.claude/agents/`, and warns when the BMAD version changed under an existing ledger (skips recorded under old workflow names need review). The ledger itself records `bmad_version` on every write.
+
+Doctor's first real run immediately caught genuine drift: BMAD 6.11 spawns `bmad-review-verification-gap`, which had no shim — created on the spot. Proof-tested: the hook blocks `bmad-build` on a generic agent in a 6.11 project using a name that exists nowhere in the hook's source, and `status` under 6.11 correctly drops the readiness gate that 6.8 requires.
 
 ## Why v2
 

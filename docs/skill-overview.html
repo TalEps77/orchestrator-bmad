@@ -41,7 +41,7 @@
 <div class="wrap">
 
 <h1>orchestrator-bmad <span style="color:var(--acc)">v2</span> — enforced, not advised</h1>
-<div class="sub">2026-08-21 · repo <code>TalEps77/orchestrator-bmad</code> · installed at <code>~/.claude/skills/orchestrator-bmad/</code> · twin of <code>skill-overview.md</code></div>
+<div class="sub">2026-08-21 · v2.1 version-agnostic · repo <code>TalEps77/orchestrator-bmad</code> · installed at <code>~/.claude/skills/orchestrator-bmad/</code> · twin of <code>skill-overview.md</code></div>
 
 <div class="cards">
   <div class="card"><div class="n" style="color:var(--bad)">1/9</div><div class="l">runs where the old prose rule actually held (audit, Aug 2026)</div></div>
@@ -205,13 +205,26 @@
 <div class="cap">The audit's worst finding — ~30 stories "done" with no story file — is now structurally impossible without a recorded user waiver.</div>
 
 <h2>Layer 1 — <code>gate.py</code>, the phase-gate ledger</h2>
-<p>Required gates (<code>prd</code>, <code>architecture</code>, <code>epics</code>, <code>readiness</code>, <code>sprint</code>) are verified against <b>artifacts on disk</b> — not against the model's memory of having run them.</p>
-<pre>python3 gate.py status                       # ✓ done / ~ skipped: reason / ✗ MISSING (exit 1)
+<p>Required gates are <b>derived at runtime from the project's own BMAD install</b> (<code>_bmad/_config/bmad-help.csv</code>) and verified against <b>artifacts on disk</b> — not against the model's memory of having run them. Hardcoded 6.8 conventions remain only as a fallback for installs missing the manifest.</p>
+<pre>python3 gate.py status                       # gates from the installed bmad-help.csv; ✓ / ~ skipped / ✗ MISSING (exit 1)
+python3 gate.py doctor                       # manifests parse? required workflows mapped? shims present? version drift?
 python3 gate.py check story-validated 2-4    # precondition before spawning dev
 python3 gate.py skip readiness --reason '…'  # deliberate skip, recorded
 python3 gate.py waive epic-batch-dev --reason 'Tal approved in chat'
 python3 gate.py decide party-mode skip --reason 'architecture uncontested'</pre>
 <div class="callout"><b>The rule:</b> run the step, or record the skip. There is no third option — and "the task didn't seem to need it" is a valid reason once it's written down.</div>
+
+<h2>v2.1 — version-agnostic</h2>
+<div class="callout"><b>Why it matters here:</b> a machine survey found <b>four BMAD versions live at once</b> (6.6 / 6.8 / 6.10 / 6.11 across 9 projects). 6.11 already renamed <code>bmad-create-architecture</code> → <code>bmad-architecture</code>, replaced <code>bmad-dev-story</code> with <code>bmad-build</code>, and dropped readiness + PRD from the required set. A 6.8-hardcoded gate would false-fail every 6.11 project.</div>
+<div class="tblwrap"><table>
+<tr><th>What</th><th>Derived from (per project, at runtime)</th><th>Fallback</th></tr>
+<tr><td>Required-gate list</td><td><code>_bmad/_config/bmad-help.csv</code> — <code>required</code> column</td><td>hardcoded 6.8 list</td></tr>
+<tr><td>Phase-work skill names (hook)</td><td><code>_bmad/_config/skill-manifest.csv</code> + classifier regex</td><td>curated 6.6–6.11 set</td></tr>
+<tr><td>Artifact directories</td><td><code>_bmad/*/config.yaml</code> — <code>planning_artifacts</code> / <code>implementation_artifacts</code> / <code>output_folder</code></td><td><code>_bmad-output/…</code></td></tr>
+<tr><td>Installed version</td><td><code>_bmad/_config/manifest.yaml</code> — stamped into every ledger write</td><td>"unknown"</td></tr>
+</table></div>
+<p><b><code>gate.py doctor</code></b> cross-checks it all: manifests parse, every required workflow mapped (unknown ones flagged + checked generically via their declared outputs), every spawn type under <code>_bmad/</code> has a shim in <code>~/.claude/agents/</code>, and the BMAD version hasn't changed under an existing ledger. Run it at session start and after every <code>npx bmad-method install</code>.</p>
+<p><span class="ok">Proof on first run:</span> doctor caught real drift immediately — BMAD 6.11 spawns <code>bmad-review-verification-gap</code>, which had no shim (created on the spot). And the hook blocked <code>bmad-build</code> on a generic agent in a 6.11 project — a workflow name that appears nowhere in the hook's own source.</p>
 
 <h2>Layer 2 — the spawn hook</h2>
 <p><code>hooks/bmad-agent-gate.py</code>, registered as a <code>PreToolUse</code> hook on <code>Agent|Task</code>. Runs before any subagent exists:</p>
