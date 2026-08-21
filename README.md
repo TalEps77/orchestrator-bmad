@@ -26,16 +26,20 @@ The fix isn't reading less. It's reading elsewhere.
 
 ```
 Check install ..... no _bmad/ ? → npx bmad-method install
+Wave 0 ............ brownfield? generate-project-context first
 Discovery ......... investigate, gather, scope
-Planning .......... PRD + architecture, documented
-Stories ........... one story file per unit of work
-Dev ............... one agent per story, in parallel
-Review ............ adversarial review — a different agent than the one that built it
+Planning .......... PRD (create + validate) + architecture, documented
+Solutioning ....... epics & stories + implementation-readiness gate
+Stories ........... CS → VS → DS → CR, one story file per unit of work
+Dev ............... one agent per story, in parallel — typed bmad-agent-dev
+Review ............ code-review per story + adversarial — a different agent
+Epic close ........ e2e tests, retrospective, sprint-status via the skill
 Wrap-up ........... tracker synced, .html regenerated, committed, next prompt emitted
-Deploy ............ behind an explicit approval gate
+Deploy ............ checkpoint-preview artifact, then an explicit approval gate
 ```
 
-Phases the task doesn't need are skipped; phases BMAD doesn't have are not invented.
+Phases the task doesn't need are skipped — **but every skip is recorded in the
+gate ledger with a reason.** Nothing is skipped silently.
 
 ---
 
@@ -50,6 +54,37 @@ Each agent's **first action** is calling the relevant skill by name:
 An agent that skips this improvises the method instead of following it — which looks like BMAD in the transcript and isn't in the artifacts.
 
 **One story per agent**, and dev separated from adversarial review, so the reviewer never inherits the implementer's rationalizations.
+
+Phase work is spawned on **typed BMAD subagents** (`bmad-agent-dev`, `bmad-agent-pm`, `bmad-agent-architect`, `bmad-review-adversarial-general`, …) — never `general-purpose`. A generic agent asked to "run bmad-dev-story" is the failure mode the enforcement layer exists to stop.
+
+---
+
+## Mechanical enforcement — not prose
+
+An audit of nine real orchestrator runs found the "invoke your skill first" rule held in **one**. Prose doesn't survive long sessions; scripts do. Two pieces ship with the skill:
+
+**`gate.py` — the phase-gate ledger.** Maintains `_bmad-output/gate-ledger.yaml` per project. Required BMAD gates (PRD, architecture, epics, readiness, sprint plan) are verified against **artifacts on disk**, not against the model's memory of having run them.
+
+```bash
+python3 gate.py status                      # phase-boundary check: done / skipped / MISSING
+python3 gate.py check story-validated 2-4   # precondition before spawning dev
+python3 gate.py skip readiness --reason '…' # deliberate skip, recorded
+python3 gate.py waive epic-batch-dev --reason '…'   # user-granted waiver
+python3 gate.py decide party-mode skip --reason '…' # judgment on an optional
+```
+
+**`hooks/bmad-agent-gate.py` — a PreToolUse hook** on the Agent tool. Registered in `~/.claude/settings.json`, it physically blocks two spawns in any `_bmad` project:
+
+1. BMAD phase work on a `general-purpose`/`Explore` agent → blocked, suggests the typed agent.
+2. `bmad-dev-story` with no story file on disk and no recorded waiver → blocked.
+
+Exit 2 stops the spawn and feeds the reason back to the model. Fail-open on internal errors — enforcement is best-effort, the work is not. Non-BMAD projects fast-exit at zero cost.
+
+---
+
+## Optional capabilities — judgment, recorded
+
+Optionals (`party-mode`, `market-research`, `prfaq`, `advanced-elicitation`, …) each carry a trigger in the skill. When the trigger fires, the orchestrator considers the capability and records the call with `gate.py decide` — one line, so skipping is a decision, not a blind spot.
 
 ---
 
@@ -110,7 +145,21 @@ A subagent starts with none of the orchestrator's context, so every task carries
 git clone https://github.com/TalEps77/orchestrator-bmad.git ~/.claude/skills/orchestrator-bmad
 ```
 
-Or copy `SKILL.md` into `~/.claude/skills/orchestrator-bmad/`.
+Or copy `SKILL.md` + `gate.py` into `~/.claude/skills/orchestrator-bmad/`.
+
+To arm the spawn gate, copy the hook and register it:
+
+```bash
+cp hooks/bmad-agent-gate.py ~/.claude/hooks/
+```
+
+```json
+{ "hooks": { "PreToolUse": [ { "matcher": "Agent|Task", "hooks": [
+  { "type": "command", "command": "python3 \"$HOME/.claude/hooks/bmad-agent-gate.py\"", "timeout": 10 }
+] } ] } }
+```
+
+The skill works without the hook — you just lose the hard block and fall back to the ledger discipline alone.
 
 BMAD itself is installed per project, and the skill checks for it before starting:
 

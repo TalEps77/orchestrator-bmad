@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>orchestrator-bmad v2 — Skill Overview</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151a22; --panel2:#1a212c; --line:#2a3342;
+    --tx:#e7eaf0; --dim:#98a3b6; --acc:#6ea8fe; --ok:#41c463; --warn:#d9a62e; --bad:#f2555a;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  .wrap{max-width:1140px;margin:0 auto;padding:42px 24px 90px}
+  h1{font-size:31px;margin:0 0 6px;letter-spacing:-.02em;line-height:1.2}
+  .sub{color:var(--dim);font-size:14px;margin-bottom:30px}
+  h2{font-size:21px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:16px;margin:26px 0 10px;color:var(--acc)}
+  p{margin:0 0 14px} ul{margin:0 0 14px;padding-left:22px} li{margin-bottom:7px}
+  code{font-family:var(--mono);font-size:13px;background:var(--panel2);padding:1px 6px;border-radius:4px;color:#cdd8ea}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 18px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.55;color:#cdd8ea}
+  .tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:0 0 18px}
+  table{border-collapse:collapse;width:100%;font-size:14px}
+  th{text-align:left;padding:10px 14px;background:var(--panel2);color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+  td{padding:10px 14px;border-top:1px solid var(--line);vertical-align:top}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:0 0 26px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .card .n{font-size:28px;font-weight:700;letter-spacing:-.02em}
+  .card .l{font-size:12.5px;color:var(--dim);margin-top:3px}
+  .callout{background:#141c2b;border-left:3px solid var(--acc);border-radius:0 8px 8px 0;padding:13px 18px;margin:0 0 20px}
+  .callout.bad{border-left-color:var(--bad);background:#211519}
+  .diagram{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:0 0 24px;overflow-x:auto}
+  .diagram svg{display:block;min-width:820px;max-width:100%;height:auto;margin:0 auto}
+  .cap{font-size:12.5px;color:var(--dim);text-align:center;margin:-14px 0 26px}
+  .ok{color:var(--ok);font-weight:600}.bad{color:var(--bad);font-weight:600}.warn{color:var(--warn);font-weight:600}
+  footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>orchestrator-bmad <span style="color:var(--acc)">v2</span> — enforced, not advised</h1>
+<div class="sub">2026-08-21 · repo <code>TalEps77/orchestrator-bmad</code> · installed at <code>~/.claude/skills/orchestrator-bmad/</code> · twin of <code>skill-overview.md</code></div>
+
+<div class="cards">
+  <div class="card"><div class="n" style="color:var(--bad)">1/9</div><div class="l">runs where the old prose rule actually held (audit, Aug 2026)</div></div>
+  <div class="card"><div class="n">3</div><div class="l">layers now: gate script · spawn hook · judgment table</div></div>
+  <div class="card"><div class="n">2</div><div class="l">spawn shapes physically blocked by the hook</div></div>
+  <div class="card"><div class="n">207</div><div class="l">SKILL.md lines (was 129) — every rule now ledger-backed</div></div>
+</div>
+
+<div class="callout bad"><b>Why v2 exists.</b> The audit found: phase work always on <code>general-purpose</code> agents; <code>validate-story</code> / <code>qa-e2e</code> / <code>checkpoint-preview</code> never run anywhere; one project with ~30 stories marked <b>done</b> and zero story files on disk. Every violated rule was prose. Prose doesn't survive a 40-agent session — scripts do.</div>
+
+<h2>Architecture</h2>
+<div class="diagram">
+<svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6ea8fe"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#f2555a"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#41c463"/>
+    </marker>
+  </defs>
+
+  <!-- Orchestrator -->
+  <rect x="330" y="18" width="300" height="86" rx="12" fill="#1a2233" stroke="#6ea8fe" stroke-width="1.6"/>
+  <text x="480" y="48" text-anchor="middle" fill="#e7eaf0" font-size="17" font-weight="700">ORCHESTRATOR (lean context)</text>
+  <text x="480" y="70" text-anchor="middle" fill="#98a3b6" font-size="12.5">routes · synthesizes · decides — never reads artifacts inline</text>
+  <text x="480" y="89" text-anchor="middle" fill="#98a3b6" font-size="12.5">runs gate.py status at every phase boundary</text>
+
+  <!-- gate.py ledger -->
+  <rect x="20" y="150" width="260" height="140" rx="12" fill="#16211a" stroke="#41c463" stroke-width="1.6"/>
+  <text x="150" y="177" text-anchor="middle" fill="#41c463" font-size="15" font-weight="700">gate.py — phase-gate ledger</text>
+  <text x="150" y="200" text-anchor="middle" fill="#c9d4c9" font-size="12">status · check · skip · waive · decide</text>
+  <text x="150" y="221" text-anchor="middle" fill="#98a3b6" font-size="12">required gates ⇐ artifacts on disk</text>
+  <text x="150" y="242" text-anchor="middle" fill="#98a3b6" font-size="12">skips need a recorded reason</text>
+  <text x="150" y="270" text-anchor="middle" fill="#7fae87" font-size="11.5" font-style="italic">_bmad-output/gate-ledger.yaml</text>
+
+  <!-- Hook -->
+  <rect x="330" y="170" width="300" height="110" rx="12" fill="#241820" stroke="#f2555a" stroke-width="1.6"/>
+  <text x="480" y="197" text-anchor="middle" fill="#f2555a" font-size="15" font-weight="700">PreToolUse hook (Agent | Task)</text>
+  <text x="480" y="219" text-anchor="middle" fill="#eecfcf" font-size="12">bmad-agent-gate.py — runs before any spawn</text>
+  <text x="480" y="240" text-anchor="middle" fill="#98a3b6" font-size="12">✗ phase work on general-purpose → BLOCK</text>
+  <text x="480" y="259" text-anchor="middle" fill="#98a3b6" font-size="12">✗ dev-story, no story file, no waiver → BLOCK</text>
+
+  <!-- BMAD install -->
+  <rect x="690" y="150" width="250" height="140" rx="12" fill="#1e1c14" stroke="#d9a62e" stroke-width="1.6"/>
+  <text x="815" y="177" text-anchor="middle" fill="#d9a62e" font-size="15" font-weight="700">BMAD-Method (_bmad/)</text>
+  <text x="815" y="200" text-anchor="middle" fill="#98a3b6" font-size="12">41 workflows · 4 phases</text>
+  <text x="815" y="221" text-anchor="middle" fill="#98a3b6" font-size="12">artifacts → _bmad-output/</text>
+  <text x="815" y="242" text-anchor="middle" fill="#98a3b6" font-size="12">agents read _bmad/ files directly</text>
+  <text x="815" y="270" text-anchor="middle" fill="#b09a5e" font-size="11.5" font-style="italic">the method the layers protect</text>
+
+  <!-- typed agents row -->
+  <g font-size="12.5" fill="#e7eaf0">
+    <rect x="20"  y="360" width="170" height="66" rx="10" fill="#151a22" stroke="#2a3342"/>
+    <text x="105" y="386" text-anchor="middle" font-weight="600">bmad-agent-pm</text>
+    <text x="105" y="406" text-anchor="middle" fill="#98a3b6">PRD · epics &amp; stories</text>
+
+    <rect x="210" y="360" width="180" height="66" rx="10" fill="#151a22" stroke="#2a3342"/>
+    <text x="300" y="386" text-anchor="middle" font-weight="600">bmad-agent-architect</text>
+    <text x="300" y="406" text-anchor="middle" fill="#98a3b6">architecture · readiness</text>
+
+    <rect x="410" y="360" width="170" height="66" rx="10" fill="#151a22" stroke="#2a3342"/>
+    <text x="495" y="386" text-anchor="middle" font-weight="600">bmad-agent-dev</text>
+    <text x="495" y="406" text-anchor="middle" fill="#98a3b6">CS · VS · DS — one story each</text>
+
+    <rect x="600" y="360" width="190" height="66" rx="10" fill="#151a22" stroke="#2a3342"/>
+    <text x="695" y="386" text-anchor="middle" font-weight="600">bmad-review-*</text>
+    <text x="695" y="406" text-anchor="middle" fill="#98a3b6">code-review · adversarial · edge-case</text>
+
+    <rect x="810" y="360" width="130" height="66" rx="10" fill="#12151b" stroke="#2a3342" stroke-dasharray="5 4"/>
+    <text x="875" y="386" text-anchor="middle" font-weight="600" fill="#98a3b6">general-purpose</text>
+    <text x="875" y="406" text-anchor="middle" fill="#98a3b6">chores only</text>
+  </g>
+
+  <!-- arrows orchestrator -> hook -->
+  <line x1="480" y1="104" x2="480" y2="166" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#arr)"/>
+  <text x="492" y="140" fill="#6ea8fe" font-size="12">every Agent spawn</text>
+
+  <!-- orchestrator <-> gate -->
+  <line x1="330" y1="70" x2="150" y2="146" stroke="#41c463" stroke-width="1.8" marker-end="url(#arrG)"/>
+  <text x="176" y="120" fill="#41c463" font-size="12">run / check / record</text>
+
+  <!-- hook -> ledger (reads waivers) -->
+  <line x1="330" y1="235" x2="284" y2="225" stroke="#41c463" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrG)"/>
+  <text x="288" y="212" fill="#7fae87" font-size="11" text-anchor="middle">reads waivers</text>
+
+  <!-- hook pass -> agents -->
+  <line x1="440" y1="280" x2="330" y2="356" stroke="#41c463" stroke-width="1.8" marker-end="url(#arrG)"/>
+  <line x1="480" y1="280" x2="490" y2="356" stroke="#41c463" stroke-width="1.8" marker-end="url(#arrG)"/>
+  <line x1="530" y1="280" x2="660" y2="356" stroke="#41c463" stroke-width="1.8" marker-end="url(#arrG)"/>
+  <text x="420" y="330" fill="#41c463" font-size="12.5" font-weight="600">exit 0 — spawn proceeds</text>
+
+  <!-- hook block loop back -->
+  <path d="M 630 210 C 720 110 560 96 632 100" fill="none" stroke="#f2555a" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrR)"/>
+  <text x="742" y="120" fill="#f2555a" font-size="12.5" font-weight="600">exit 2 — blocked, reason fed back</text>
+
+  <!-- agents -> bmad -->
+  <line x1="790" y1="360" x2="835" y2="294" stroke="#d9a62e" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="852" y="332" fill="#d9a62e" font-size="12">invoke bmad-* skill first</text>
+
+  <!-- outputs -->
+  <rect x="210" y="480" width="560" height="56" rx="10" fill="#141c2b" stroke="#6ea8fe"/>
+  <text x="490" y="504" text-anchor="middle" fill="#e7eaf0" font-size="14" font-weight="600">_bmad-output/ — PRD · architecture · story files · reviews · sprint-status · gate-ledger</text>
+  <text x="490" y="524" text-anchor="middle" fill="#98a3b6" font-size="12">agents return summaries; artifacts persist on disk (.md + .html twins)</text>
+  <line x1="300" y1="426" x2="380" y2="476" stroke="#6ea8fe" stroke-width="1.4" marker-end="url(#arr)"/>
+  <line x1="495" y1="426" x2="490" y2="476" stroke="#6ea8fe" stroke-width="1.4" marker-end="url(#arr)"/>
+  <line x1="695" y1="426" x2="610" y2="476" stroke="#6ea8fe" stroke-width="1.4" marker-end="url(#arr)"/>
+</svg>
+</div>
+<div class="cap">Every spawn passes through the hook. Typed agents do phase work; the ledger is the single audit trail.</div>
+
+<h2>The story cycle, enforced</h2>
+<div class="diagram">
+<svg viewBox="0 0 960 260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6ea8fe"/>
+    </marker>
+    <marker id="a2r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#f2555a"/>
+    </marker>
+  </defs>
+  <g font-size="13.5" fill="#e7eaf0">
+    <rect x="20" y="80" width="165" height="64" rx="10" fill="#151a22" stroke="#6ea8fe" stroke-width="1.4"/>
+    <text x="102" y="106" text-anchor="middle" font-weight="700">create-story (CS)</text>
+    <text x="102" y="126" text-anchor="middle" fill="#98a3b6" font-size="11.5">story file → disk</text>
+
+    <rect x="225" y="80" width="170" height="64" rx="10" fill="#151a22" stroke="#6ea8fe" stroke-width="1.4"/>
+    <text x="310" y="106" text-anchor="middle" font-weight="700">validate-story (VS)</text>
+    <text x="310" y="126" text-anchor="middle" fill="#98a3b6" font-size="11.5">was 0-for-9 projects — now gated</text>
+
+    <rect x="435" y="80" width="160" height="64" rx="10" fill="#1a2233" stroke="#6ea8fe" stroke-width="2"/>
+    <text x="515" y="106" text-anchor="middle" font-weight="700">dev-story (DS)</text>
+    <text x="515" y="126" text-anchor="middle" fill="#98a3b6" font-size="11.5">typed bmad-agent-dev</text>
+
+    <rect x="635" y="80" width="165" height="64" rx="10" fill="#151a22" stroke="#6ea8fe" stroke-width="1.4"/>
+    <text x="717" y="106" text-anchor="middle" font-weight="700">code-review (CR)</text>
+    <text x="717" y="126" text-anchor="middle" fill="#98a3b6" font-size="11.5">fresh agent, per story</text>
+
+    <rect x="840" y="80" width="100" height="64" rx="10" fill="#16211a" stroke="#41c463" stroke-width="1.6"/>
+    <text x="890" y="118" text-anchor="middle" font-weight="700" fill="#41c463">done</text>
+  </g>
+  <line x1="185" y1="112" x2="221" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
+  <line x1="395" y1="112" x2="431" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
+  <line x1="595" y1="112" x2="631" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
+  <line x1="800" y1="112" x2="836" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
+
+  <!-- findings loop -->
+  <path d="M 717 148 C 717 205 515 205 517 150" fill="none" stroke="#d9a62e" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a2)"/>
+  <text x="617" y="215" text-anchor="middle" fill="#d9a62e" font-size="12.5">findings → back to dev-story</text>
+
+  <!-- hook guard -->
+  <rect x="405" y="12" width="220" height="40" rx="8" fill="#241820" stroke="#f2555a" stroke-width="1.4"/>
+  <text x="515" y="37" text-anchor="middle" fill="#f2555a" font-size="12.5" font-weight="600">hook: no story file &amp; no waiver → BLOCK</text>
+  <line x1="515" y1="52" x2="515" y2="76" stroke="#f2555a" stroke-width="1.6" marker-end="url(#a2r)"/>
+</svg>
+</div>
+<div class="cap">The audit's worst finding — ~30 stories "done" with no story file — is now structurally impossible without a recorded user waiver.</div>
+
+<h2>Layer 1 — <code>gate.py</code>, the phase-gate ledger</h2>
+<p>Required gates (<code>prd</code>, <code>architecture</code>, <code>epics</code>, <code>readiness</code>, <code>sprint</code>) are verified against <b>artifacts on disk</b> — not against the model's memory of having run them.</p>
+<pre>python3 gate.py status                       # ✓ done / ~ skipped: reason / ✗ MISSING (exit 1)
+python3 gate.py check story-validated 2-4    # precondition before spawning dev
+python3 gate.py skip readiness --reason '…'  # deliberate skip, recorded
+python3 gate.py waive epic-batch-dev --reason 'Tal approved in chat'
+python3 gate.py decide party-mode skip --reason 'architecture uncontested'</pre>
+<div class="callout"><b>The rule:</b> run the step, or record the skip. There is no third option — and "the task didn't seem to need it" is a valid reason once it's written down.</div>
+
+<h2>Layer 2 — the spawn hook</h2>
+<p><code>hooks/bmad-agent-gate.py</code>, registered as a <code>PreToolUse</code> hook on <code>Agent|Task</code>. Runs before any subagent exists:</p>
+<div class="tblwrap"><table>
+<tr><th>Spawn shape</th><th>Result</th></tr>
+<tr><td>BMAD phase work (<code>bmad-dev-story</code>, <code>bmad-code-review</code>, <code>bmad-prd</code>, …) on <code>general-purpose</code> / <code>Explore</code></td><td class="bad">BLOCKED — message names the correct typed agent</td></tr>
+<tr><td><code>bmad-dev-story</code> with no story file on disk, none in the prompt, no waiver in the ledger</td><td class="bad">BLOCKED — "run create-story first, or record a waiver"</td></tr>
+<tr><td>Typed agent + story file referenced and present</td><td class="ok">passes</td></tr>
+<tr><td>Any spawn outside a <code>_bmad</code> project, or any internal hook error</td><td class="ok">passes (fail-open, zero cost)</td></tr>
+</table></div>
+<p>Exit 2 stops the call and feeds the reason back — the model fixes the cause instead of rephrasing past the gate.</p>
+
+<h2>Layer 3 — optionals: judgment, recorded</h2>
+<div class="tblwrap"><table>
+<tr><th>Capability</th><th>Trigger to consider it</th></tr>
+<tr><td><code>bmad-party-mode</code></td><td>Contested decision, ≥2 defensible options, undecided user — multi-persona debate beats a wrong pick.</td></tr>
+<tr><td><code>bmad-market-research</code></td><td>Greenfield product for external users, or "is there demand / who competes".</td></tr>
+<tr><td><code>bmad-domain-research</code></td><td>Unfamiliar regulated or jargon-heavy domain.</td></tr>
+<tr><td><code>bmad-prfaq</code></td><td>User genuinely unsure of the concept and open to being swayed.</td></tr>
+<tr><td><code>bmad-advanced-elicitation</code></td><td>A required-gate artifact feels shallow before committing — red-team it first.</td></tr>
+<tr><td><code>bmad-spec</code></td><td>Messy multi-source intent that needs distilling before a PRD.</td></tr>
+<tr><td><code>bmad-quick-dev</code></td><td>One-off change outside any epic. Never inside a sprint.</td></tr>
+<tr><td><code>bmad-customize</code></td><td>The same skip keeps recurring — encode the fix into the workflow.</td></tr>
+</table></div>
+<p>When a trigger fires, the call goes into the ledger with <code>gate.py decide</code> — one line. Skipping becomes a decision, not a blind spot.</p>
+
+<h2>What v2 fixes, mapped to the audit</h2>
+<div class="tblwrap"><table>
+<tr><th>Audit defect</th><th>v2 mechanism</th></tr>
+<tr><td>Subagents didn't invoke BMAD skills (1/9 compliance)</td><td>Typed-agent rule + hook block on generic spawns</td></tr>
+<tr><td>~30 stories done with no story files</td><td>Hook blocks dev-story without a story file; waiver requires user words</td></tr>
+<tr><td>Epic-level batching instead of one story per agent</td><td>Explicit user waiver, recorded in the ledger</td></tr>
+<tr><td><code>validate-story</code> never ran anywhere</td><td>Gate row + <code>check story-validated</code> precondition</td></tr>
+<tr><td><code>readiness</code> stale since May</td><td>Required gate — <code>status</code> exits 1 while it's MISSING</td></tr>
+<tr><td>No e2e tests, no checkpoints, hand-edited tracker</td><td>Epic-close and deploy-gate rows in the ledger; tracker only via skill / close-story</td></tr>
+<tr><td>Optionals never even considered</td><td>Trigger table + <code>decide</code> log</td></tr>
+</table></div>
+
+<h2>Files</h2>
+<div class="tblwrap"><table>
+<tr><th>File</th><th>Installed at</th><th>Repo path</th></tr>
+<tr><td>SKILL.md (207 lines, was 129)</td><td><code>~/.claude/skills/orchestrator-bmad/</code></td><td><code>SKILL.md</code></td></tr>
+<tr><td>gate.py</td><td><code>~/.claude/skills/orchestrator-bmad/</code></td><td><code>gate.py</code></td></tr>
+<tr><td>spawn-gate hook</td><td><code>~/.claude/hooks/bmad-agent-gate.py</code></td><td><code>hooks/bmad-agent-gate.py</code></td></tr>
+<tr><td>hook registration</td><td><code>~/.claude/settings.json</code> → PreToolUse</td><td>README snippet</td></tr>
+</table></div>
+<p>Installed copy and repo copy verified byte-identical.</p>
+
+<footer>orchestrator-bmad v2 · 2026-08-21 · audit source: <code>AUDIT-2026-08-21.md</code> (9 runs, ~200 subagents, 10 artifact trees) · all mechanisms pipe-tested before shipping</footer>
+</div>
+</body>
+</html>
