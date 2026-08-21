@@ -47,6 +47,13 @@ workflow most likely to drown an orchestrator that reads its own artifacts.
   npx bmad-method install
   ```
 
+- **Run `gate.py doctor` before the first wave — every session.** This is YOUR
+  action, not the user's: run it at session start on an existing install, and
+  again immediately after any `npx bmad-method install` (fresh or update). It
+  verifies the manifests parse, every required workflow is mapped, every spawn
+  type has a shim, and flags version drift under an existing ledger. Fix what
+  it reports (create missing shims, review stale skips) before spawning agents.
+
 - **Run the workflow end-to-end** as the task demands: discovery → planning and
   documentation → stories → dev → review → deployment. Don't skip phases the task
   needs; don't invent phases it doesn't.
@@ -116,10 +123,9 @@ The ledger lives in a file and a script maintains it — never hand-edit it:
   from the project's installed `bmad-help.csv` and checked against artifacts on
   disk, not against your memory of having run them. Version-agnostic: renamed
   workflows and changed required-sets are picked up automatically.
-- `gate.py doctor` — run once per session start and after any
-  `npx bmad-method install`: verifies the manifests parse, every required
-  workflow is mapped, all spawn types have shims, and warns when the BMAD
-  version changed under an existing ledger.
+- `gate.py doctor` — see "Run gate.py doctor before the first wave" above; it
+  belongs to session start and to every install/update, and its findings are
+  fixed before work begins.
 - `gate.py check <gate> [slug]` — precondition check before spawning
   (`readiness`, `story <slug>`, `story-validated <slug>`, `code-review <slug>`).
 - `gate.py skip <step> --reason '...'` — record a deliberate skip.

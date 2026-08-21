@@ -1,108 +1,119 @@
-# orchestrator-bmad v2 — What Changed and How It Works
-**Updated:** 2026-08-21 (v2.1: version-agnostic) · twin of `skill-overview.html`
+# orchestrator-bmad — Skill Overview
+**Updated:** 2026-08-21 · twin of `skill-overview.html`
 
-## v2.1 — version-agnostic enforcement
+## What it is
 
-v2 hardcoded BMAD 6.8 conventions. A machine survey found **four BMAD versions live at once** (6.6 / 6.8 / 6.10 / 6.11 across 9 projects), and 6.11 had already renamed workflows (`bmad-create-architecture` → `bmad-architecture`, `bmad-dev-story` → `bmad-build`, phases `plan`/`ship`) and changed the required set (readiness and PRD no longer marked required). v2.1 derives everything at runtime from the project's own install:
+A Claude Code skill that runs the [BMAD-Method](https://github.com/bmad-code-org/BMAD-METHOD) workflow from a **lean orchestrator**: the main agent routes, synthesizes, and decides, while every phase and every story executes in its own subagent. Compliance with the method is **mechanical** — a gate script and a spawn hook enforce it — not a matter of the model remembering instructions.
 
-| What | Derived from | Fallback |
+Trigger: "bmad this", "use the BMAD workflow", "act as orchestrator" on a BMAD project, or `/orchestrator-bmad`.
+
+## The three components
+
+| Component | Where | Role |
 |---|---|---|
-| Which workflows are required | `_bmad/_config/bmad-help.csv` (`required` column) | hardcoded 6.8 list |
-| Phase-work skill names for the hook | `_bmad/_config/skill-manifest.csv` + classifier regex | curated 6.6–6.11 set |
-| Artifact directories | `_bmad/*/config.yaml` (`planning_artifacts`, `implementation_artifacts`, `output_folder`, with `{project-root}` resolution) | `_bmad-output/...` |
-| Installed version | `_bmad/_config/manifest.yaml` | "unknown" |
+| `SKILL.md` | `~/.claude/skills/orchestrator-bmad/` | The playbook: workflow, phase-gate table, story-cycle rules, model selection, task-brief format, optional-capability triggers |
+| `gate.py` | same dir | The ledger: verifies required gates against artifacts on disk; records skips, waivers, and judgment calls in `gate-ledger.yaml` |
+| `bmad-agent-gate.py` | `~/.claude/hooks/` (PreToolUse on `Agent\|Task`) | The gate: physically blocks non-compliant subagent spawns before they exist |
 
-New command — **`gate.py doctor`**: verifies the manifests parse, every required workflow is mapped (unknown ones fall back to a generic outputs-keyword check and are flagged), every spawn type referenced under `_bmad/` has a shim in `~/.claude/agents/`, and warns when the BMAD version changed under an existing ledger (skips recorded under old workflow names need review). The ledger itself records `bmad_version` on every write.
+Supporting cast: typed subagent shims in `~/.claude/agents/bmad-*.md` (register the agent types BMAD workflows spawn), and the `close-story` skill for story wrap-up.
 
-Doctor's first real run immediately caught genuine drift: BMAD 6.11 spawns `bmad-review-verification-gap`, which had no shim — created on the spot. Proof-tested: the hook blocks `bmad-build` on a generic agent in a 6.11 project using a name that exists nowhere in the hook's source, and `status` under 6.11 correctly drops the readiness gate that 6.8 requires.
+## How a session runs
 
-## Why v2
+```
+0  Doctor ......... gate.py doctor — manifests parse? shims present? version drift?
+                    (skill action, every session start and after any BMAD install/update)
+0b Brownfield ..... no project-context.md? → generate-project-context first
+1  Clarify ........ every question asked up front — then uninterrupted execution
+2  Waves .......... one BMAD phase per wave; concurrent subagents inside it
+   ├─ each wave opens and closes with gate.py status
+   └─ each subagent: typed bmad-* agent, invokes its bmad-* skill FIRST
+3  Story cycle .... create-story → validate-story → dev-story → code-review, per story
+4  Epic close ..... e2e tests · retrospective · sprint-status via the skill
+5  Wrap-up ........ close-story: tracker synced, .html twins, commit, next prompt
+6  Deploy ......... checkpoint-preview artifact → explicit approval gate
+```
 
-An audit of 9 real orchestrator runs (Aug 2026, ~200 subagents) found:
-
-- "Every subagent invokes its BMAD skill first" held in **1 run of 9**.
-- All phase work ran on `general-purpose` agents until 08-19; typed `bmad-agent-*` never used before that.
-- `validate-story`, `qa-generate-e2e-tests`, `checkpoint-preview`, `sprint-status`: **never ran anywhere**.
-- One project marked ~30 stories `done` with **no story files ever created** — the tracker pointed at a directory that didn't exist.
-- Required gate `check-implementation-readiness` had not run since May.
-
-Root cause: every rule was prose. Prose doesn't survive a 40-agent session. v2 moves enforcement into a script and a hook.
-
-## The three layers
-
-### 1. `gate.py` — phase-gate ledger (deterministic)
-
-Lives in the skill dir; maintains `_bmad-output/gate-ledger.yaml` per project. Required gates are verified against **artifacts on disk**, never against the model's memory.
-
-| Command | What it does |
-|---|---|
-| `gate.py status` | Phase-boundary check. Each required gate: ✓ done / ~ skipped-with-reason / ✗ MISSING (exit 1). |
-| `gate.py check <gate> [slug]` | Precondition before a spawn: `readiness`, `story 2-4`, `story-validated 2-4`, `code-review 2-4`. |
-| `gate.py skip <step> --reason` | Records a deliberate skip. The reason is the point. |
-| `gate.py waive <scope> --reason` | User-granted waiver (e.g. epic-batch dev). Only the user grants these. |
-| `gate.py decide <step> run\|skip --reason` | Judgment call on an optional capability, logged. |
+## The enforcement model
 
 **Rule: run the step, or record the skip. There is no third option.**
 
-### 2. `bmad-agent-gate.py` — PreToolUse hook (hard block)
+### gate.py — the phase-gate ledger
 
-Registered in `~/.claude/settings.json` on `Agent|Task`. In any `_bmad` project it blocks, at spawn time, before the agent exists:
+Required gates are **derived at runtime from the project's own BMAD install** — `_bmad/_config/bmad-help.csv` (which workflows exist, which are required), `_bmad/*/config.yaml` (where artifacts live), `manifest.yaml` (installed version). This makes the skill version-agnostic: renamed workflows and changed required-sets across BMAD versions are picked up automatically per project. A hardcoded fallback covers installs missing the manifests.
 
-1. **Wrong agent type** — BMAD phase work (`bmad-dev-story`, `bmad-code-review`, `bmad-prd`, …) on a `general-purpose`/`Explore` agent. Block message names the correct typed agent.
-2. **No story file** — a `bmad-dev-story` spawn when no story file exists on disk, none is referenced in the prompt, and no waiver is recorded.
+```bash
+gate.py doctor                       # session start / after install: manifests, mappings, shims, drift
+gate.py status                       # phase boundary: ✓ done / ~ skipped: reason / ✗ MISSING (exit 1)
+gate.py check story-validated 2-4    # precondition before spawning dev
+gate.py skip readiness --reason '…'  # deliberate skip, recorded
+gate.py waive epic-batch-dev --reason '…'   # user-granted waiver (only the user grants these)
+gate.py decide party-mode skip --reason '…' # judgment call on an optional, logged
+```
 
-Exit 2 stops the spawn; the reason is fed back to the model so it fixes the cause instead of retrying. Fail-open on any internal error. Non-BMAD projects: fast-exit, zero cost.
+Everything lands in `gate-ledger.yaml` in the project's BMAD output folder, stamped with the BMAD version it was written under.
 
-### 3. SKILL.md — judgment layer (prose, but ledger-backed)
+### The spawn hook — hard blocks
 
-- **Phase-gate table**: all 41 BMAD workflows, required-marked, each with its rule.
-- **Story cycle is load-bearing**: story file on disk is the precondition for dev; CS → VS → DS → CR per story; epic batching requires an explicit user waiver.
-- **Optional-capability triggers**: `party-mode` (contested decision, undecided user), `market-research` (greenfield external product), `prfaq` (concept unsure), `advanced-elicitation` (shallow artifact before a gate), `spec` (messy multi-source intent), `quick-dev` (one-off outside any epic), `customize` (recurring skip → encode it). When a trigger fires, the call is recorded with `gate.py decide`.
-- **Reporting contract**: closing docs carry the skip ledger, per-story CS/VS/DS/CR status, verification evidence per epic.
+Runs before any subagent exists. In a `_bmad` project it blocks:
 
-## The story cycle, enforced
+| Spawn shape | Result |
+|---|---|
+| BMAD phase work on a `general-purpose`/`Explore` agent | **BLOCKED** — names the correct typed agent |
+| Dev workflow (`bmad-dev-story`/`bmad-build`) with no story file on disk and no waiver | **BLOCKED** — "run create-story first, or record a waiver" |
+| Typed agent + story file present | passes |
+| Anything outside a `_bmad` project, or any internal hook error | passes (fail-open, zero cost) |
+
+Exit 2 stops the call and feeds the reason back — the orchestrator fixes the cause, never rephrases past the gate. Phase-work skill names come from the project's `skill-manifest.csv`, so the hook recognizes workflows it has never seen by name.
+
+### The story cycle — load-bearing
 
 ```
 create-story ──► validate-story ──► dev-story ──► code-review ──► done
-     │                │           ▲ blocked by hook          │
-     │                │           │ unless story file        │ findings?
-     └── story file   └── report  │ exists (or waiver)       └──► back to dev-story
-         on disk          on disk
+     │                │           ▲ hook blocks unless          │
+     └── story file   └── report  │ story file exists           │ findings?
+         on disk          on disk │ (or user waiver)            └──► back to dev-story
 ```
 
-## Audit trail per project
+- A story file on disk is the **precondition** for dev — no exceptions without a recorded user waiver.
+- One story per agent; dev and review are **separate agents**, so the reviewer never inherits the implementer's rationalizations.
+- `bmad-code-review` runs per story (it's the three-layer review: Blind Hunter, Edge Case Hunter, Acceptance Auditor); adversarial review is one lens, not a substitute.
 
-`_bmad-output/gate-ledger.yaml`:
+## Optional capabilities — judgment, recorded
 
-```yaml
-skips:
-  - step: readiness
-    reason: brownfield hotfix — PRD/arch unchanged since 05-25 report
-    ts: 2026-08-21T10:14:03
-waivers:
-  - scope: epic-batch-dev
-    reason: Tal approved batching epic 7 (3 trivial stories) in chat
-    ts: 2026-08-21T11:02:11
-decisions:
-  - step: party-mode
-    decision: skip
-    reason: architecture uncontested — single defensible option
-```
+Never required; each has a trigger. When it fires, the orchestrator considers the capability and logs the call with `gate.py decide`:
 
-## Files
+| Capability | Trigger |
+|---|---|
+| `bmad-party-mode` | Contested decision, ≥2 defensible options, undecided user |
+| `bmad-market-research` | Greenfield product for external users |
+| `bmad-domain-research` | Unfamiliar regulated/jargon-heavy domain |
+| `bmad-prfaq` | Concept genuinely unsure, user open to being swayed |
+| `bmad-advanced-elicitation` | A required-gate artifact feels shallow before committing |
+| `bmad-spec` | Messy multi-source intent needing distillation before a PRD |
+| `bmad-quick-dev` | One-off change outside any epic (never inside a sprint) |
+| `bmad-customize` | The same skip keeps recurring — encode the fix into the workflow |
 
-| File | Installed at | Repo path |
-|---|---|---|
-| SKILL.md (207 lines, was 129) | `~/.claude/skills/orchestrator-bmad/` | `SKILL.md` |
-| gate.py | `~/.claude/skills/orchestrator-bmad/` | `gate.py` |
-| spawn-gate hook | `~/.claude/hooks/bmad-agent-gate.py` | `hooks/bmad-agent-gate.py` |
-| hook registration | `~/.claude/settings.json` → `PreToolUse: Agent\|Task` | README snippet |
+## Model per subagent
 
-Installed copy and repo copy are byte-identical (verified with `diff`).
+| Model | Use for |
+|---|---|
+| `sonnet` | mechanical well-specified work, rendering, doc generation, searches |
+| `opus` | design-heavy work, safety-critical code, adversarial review |
+| `fable` | only when deep planning is genuinely required and worth the cost |
 
-## Verified before shipping
+Every task description starts with the model name (`opus: adversarial review of story 4.2`) — an unlabeled agent is an unauditable agent. The rule propagates to every depth of nesting.
 
-- `gate.py status` on HermesPlus → all 5 required gates green; on local-whisper → correctly flags `readiness MISSING` (matches the audit finding).
-- Hook: 5 pipe-tests — both block paths block (exit 2 + actionable stderr), pass paths pass, garbage stdin fails open.
-- Skip round-trip: record → status shows `~ skipped: reason` → clean exit.
-- `settings.json` schema-validated with `jq -e`; pre-existing hooks untouched.
+## Writing a subagent task
+
+Every brief carries: **agent type** (typed `bmad-*`), **skill** to invoke first, **goal** (finished state), **inputs** (exact paths), **output contract** (where to write + summary back, never a transcript), **boundaries** (no commit/deploy by default), **propagation** (these same rules travel down to nested spawns).
+
+## Reporting
+
+- Subagents return summaries with evidence — commands run, artifact paths, residual risks.
+- "Done" requires verification: tests green, 2xx on the real URL, or a rendered screenshot.
+- Phase boundaries report the ledger — what ran AND what was skipped with reasons.
+- Closing documents (`.md` + `.html` twins): original prompt, plan, agents + models, per-story CS/VS/DS/CR status, skip ledger, verification evidence, deliberate omissions.
+
+## Background
+
+The enforcement layer exists because an audit (2026-08-21, nine real runs, ~200 subagents) showed prose rules don't survive long sessions — details in `AUDIT-2026-08-21.md` alongside the installed skill. The version-agnostic derivation exists because four BMAD versions were found installed side by side, with workflow renames between them.
