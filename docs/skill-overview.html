@@ -208,13 +208,25 @@
 
 <h2>gate.py — the phase-gate ledger</h2>
 <p>Required gates are <b>derived at runtime from the project's own BMAD install</b> — <code>_bmad/_config/bmad-help.csv</code> (which workflows exist, which are required), <code>_bmad/*/config.yaml</code> (where artifacts live), <code>manifest.yaml</code> (installed version). This makes the skill <b>version-agnostic</b>: renamed workflows and changed required-sets across BMAD versions are picked up automatically, per project. A hardcoded fallback covers installs missing the manifests.</p>
-<pre>gate.py doctor                       # session start / after install: manifests, mappings, shims, drift
+<pre>gate.py doctor                       # session start / after install: manifests, mappings, shims, drift, new version
+gate.py doctor --no-net              # same, skipping the npm version check
 gate.py status                       # phase boundary: ✓ done / ~ skipped: reason / ✗ MISSING (exit 1)
 gate.py check story-validated 2-4    # precondition before spawning dev
 gate.py skip readiness --reason '…'  # deliberate skip, recorded
 gate.py waive epic-batch-dev --reason '…'   # user-granted waiver (only the user grants these)
 gate.py decide party-mode skip --reason '…' # judgment call on an optional, logged</pre>
 <div class="callout"><b>The rule:</b> run the step, or record the skip. There is no third option — and "the task didn't seem to need it" is a valid reason once it's written down. Everything lands in <code>gate-ledger.yaml</code>, stamped with the BMAD version it was written under.</div>
+
+<h2>Version handling — check always, update never silently</h2>
+<p>Doctor also compares the installed version against the latest published on npm (10s timeout; offline is a silent skip). It only <b>reports</b> — an update regenerates each project's <code>.claude/skills/</code> and <code>.agents/skills/</code> and writes <code>.bak</code> files (tracked-file changes), and a version bump can rename workflows mid-flight.</p>
+<div class="tblwrap"><table>
+<tr><th>State</th><th>Action</th></tr>
+<tr><td>No <code>_bmad/</code> at all</td><td>Install latest outright — nothing to disturb, no question needed</td></tr>
+<tr><td>Update available, <b>no sprint in progress</b></td><td><b>AskUserQuestion</b>: update now or stay on the current version. On approval → update, re-run doctor, create any newly-missing shims</td></tr>
+<tr><td>Update available, <b>sprint in progress</b></td><td>Don't ask mid-epic — record <code>gate.py decide bmad-update skip</code> and raise it at epic close</td></tr>
+<tr><td>Offline / npm slow</td><td>Check skipped silently; work proceeds</td></tr>
+</table></div>
+<p>Doctor detects "sprint in progress" from the tracker itself (<code>in-progress</code> / <code>ready-for-dev</code> / <code>review</code> statuses) and prints the matching recommendation, so the orchestrator doesn't have to judge it.</p>
 
 <h2>The spawn hook — hard blocks</h2>
 <div class="tblwrap"><table>

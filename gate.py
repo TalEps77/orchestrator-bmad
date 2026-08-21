@@ -261,6 +261,29 @@ def cmd_status(args):
         save(r, led)  # stamp version on first contact
     return 1 if bad else 0
 
+def latest_published(timeout=10):
+    """Latest bmad-method version on npm, or None (offline / npm missing / slow).
+    Read-only: never installs, never writes."""
+    import subprocess
+    try:
+        out = subprocess.run(["npm", "view", "bmad-method", "version"],
+                             capture_output=True, text=True, timeout=timeout)
+        v = out.stdout.strip()
+        return v if re.match(r"^\d+\.\d+\.\d+", v) else None
+    except Exception:
+        return None
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3]) or (0,)
+
+def sprint_in_progress(r):
+    """True if any story/epic is mid-flight — an update should wait for epic close."""
+    ss = g(bmad_paths(r)["output_folder"], "sprint-status.yaml")
+    if not ss:
+        return False
+    txt = open(ss, encoding="utf-8", errors="replace").read()
+    return bool(re.search(r":\s*(in-progress|ready-for-dev|review)\s*$", txt, re.M))
+
 def cmd_doctor(args):
     """Cross-check this script's assumptions against the installed BMAD."""
     r = root()
@@ -306,6 +329,23 @@ def cmd_doctor(args):
     if prev and prev != ver:
         print(f"  ! ledger was written under BMAD {prev}; now {ver} — review skips for renamed workflows")
         issues += 1
+    # version check — REPORT ONLY. Never updates: an update rewrites tracked
+    # files (.claude/skills, .agents/skills, .bak) and can change workflow
+    # semantics mid-sprint, so the decision belongs to the user.
+    if not args.no_net:
+        latest = latest_published()
+        if latest and ver != "unknown" and vtuple(latest) > vtuple(ver):
+            mid = sprint_in_progress(r)
+            print(f"  ! update available: {ver} → {latest}")
+            if mid:
+                print("    sprint in progress — recommend updating at epic close, not now")
+            else:
+                print("    no sprint in progress — safe point to update, ask the user first")
+            print(f"    npx -y bmad-method@latest install --directory . --action quick-update -y")
+            print("    then re-run: gate.py doctor   (regenerates IDE skill dirs — dirties git)")
+            issues += 1
+        elif latest and ver == latest:
+            print(f"  BMAD {ver} is the latest published version")
     if not issues:
         print("  OK — manifests parsed, all required workflows mapped, shims present, version stable")
     save(r, led)
@@ -346,7 +386,10 @@ def main():
     d.add_argument("decision", choices=["run", "skip"])
     d.add_argument("--reason", required=True); d.set_defaults(f=cmd_decide)
     st = sub.add_parser("status"); st.set_defaults(f=cmd_status)
-    dr = sub.add_parser("doctor"); dr.set_defaults(f=cmd_doctor)
+    dr = sub.add_parser("doctor")
+    dr.add_argument("--no-net", action="store_true",
+                    help="skip the npm version check (offline / fast path)")
+    dr.set_defaults(f=cmd_doctor)
     a = ap.parse_args()
     sys.exit(a.f(a))
 

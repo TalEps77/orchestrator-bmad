@@ -42,7 +42,8 @@ Supporting cast: typed subagent shims in `~/.claude/agents/bmad-*.md` (register 
 Required gates are **derived at runtime from the project's own BMAD install** — `_bmad/_config/bmad-help.csv` (which workflows exist, which are required), `_bmad/*/config.yaml` (where artifacts live), `manifest.yaml` (installed version). This makes the skill version-agnostic: renamed workflows and changed required-sets across BMAD versions are picked up automatically per project. A hardcoded fallback covers installs missing the manifests.
 
 ```bash
-gate.py doctor                       # session start / after install: manifests, mappings, shims, drift
+gate.py doctor                       # session start / after install: manifests, mappings, shims, drift, new version
+gate.py doctor --no-net              # same, skipping the npm version check
 gate.py status                       # phase boundary: ✓ done / ~ skipped: reason / ✗ MISSING (exit 1)
 gate.py check story-validated 2-4    # precondition before spawning dev
 gate.py skip readiness --reason '…'  # deliberate skip, recorded
@@ -51,6 +52,19 @@ gate.py decide party-mode skip --reason '…' # judgment call on an optional, lo
 ```
 
 Everything lands in `gate-ledger.yaml` in the project's BMAD output folder, stamped with the BMAD version it was written under.
+
+### Version handling — check always, update never silently
+
+Doctor also compares the installed version against the latest published on npm (10s timeout; offline is a silent skip). It only **reports** — an update regenerates each project's `.claude/skills/` and `.agents/skills/` and writes `.bak` files, i.e. tracked-file changes, and can rename workflows mid-flight. So:
+
+| State | Action |
+|---|---|
+| No `_bmad/` at all | Install latest outright — nothing to disturb |
+| Update available, no sprint in progress | **AskUserQuestion**: update now or stay. On approval → update, re-run doctor, fix new shims |
+| Update available, sprint in progress | Don't ask mid-epic — record `gate.py decide bmad-update skip` and raise it at epic close |
+| Offline / npm slow | Check skipped silently, work proceeds |
+
+Doctor detects "sprint in progress" from the tracker (`in-progress` / `ready-for-dev` / `review` statuses) and prints the matching recommendation itself.
 
 ### The spawn hook — hard blocks
 

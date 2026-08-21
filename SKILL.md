@@ -51,8 +51,26 @@ workflow most likely to drown an orchestrator that reads its own artifacts.
   action, not the user's: run it at session start on an existing install, and
   again immediately after any `npx bmad-method install` (fresh or update). It
   verifies the manifests parse, every required workflow is mapped, every spawn
-  type has a shim, and flags version drift under an existing ledger. Fix what
-  it reports (create missing shims, review stale skips) before spawning agents.
+  type has a shim, flags version drift under an existing ledger, and reports
+  whether a newer BMAD is published. Fix what it reports (create missing shims,
+  review stale skips) before spawning agents.
+
+- **A newer BMAD published? Ask — never update silently.** Doctor only reports;
+  updating is a decision, because `install --action quick-update` regenerates
+  each project's `.claude/skills/` and `.agents/skills/` and writes `.bak`
+  files — tracked-file changes that would otherwise land unannounced in the
+  user's working tree — and a version bump can rename workflows mid-flight.
+  Handle it by state:
+
+  | State | Action |
+  |---|---|
+  | No `_bmad/` at all | Install latest outright: `npx bmad-method install`. No question needed — there is nothing to disturb. |
+  | Update available, **no sprint in progress** | **Ask via AskUserQuestion** (never a plain-text question): update now / stay on the current version. Mention the version jump and the dirty-working-tree side effect. On approval: update, re-run doctor, fix any newly-missing shims, then start work. |
+  | Update available, **sprint in progress** (doctor says so) | Do NOT ask mid-epic. Record it — `gate.py decide bmad-update skip --reason 'sprint in progress, revisit at epic close'` — and raise it at epic close. |
+  | Offline / npm slow | Doctor skips the check silently. Proceed; do not block on it. |
+
+  After any accepted update, review stale ledger skips: a skip recorded against
+  a workflow name that the new version renamed is no longer meaningful.
 
 - **Run the workflow end-to-end** as the task demands: discovery → planning and
   documentation → stories → dev → review → deployment. Don't skip phases the task
@@ -218,8 +236,10 @@ its own tier and label none of it.
    restarting their work from scratch. Near a limit, stop starting new agents and
    just report what remains.
 4. **Approval gates.** Ask before every irreversible step — deploys, real
-   messages sent, migrations, deletes, `git push` / `merge`, real spend. Never
-   batch two irreversible steps behind one approval.
+   messages sent, migrations, deletes, `git push` / `merge`, real spend, BMAD
+   version updates. Never batch two irreversible steps behind one approval.
+   Use **AskUserQuestion** for these gates, not a question buried in prose — a
+   gate the user can scroll past is not a gate.
 
 ## Writing a subagent task
 
