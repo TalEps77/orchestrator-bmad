@@ -100,7 +100,21 @@ def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 # ---------------------------------------------------- artifact-evidence checks
+def _ci(pattern):
+    """Case-insensitive glob pattern: a->[aA]. Real artifacts are named
+    ARCHITECTURE-SPINE.md and PRD.md as often as lowercase, and a
+    case-sensitive glob reports a gate MISSING while the file sits on disk —
+    which reads as 'the workflow never ran' and invites re-running it."""
+    out = []
+    for ch in pattern:
+        if ch.isalpha():
+            out.append("[" + ch.lower() + ch.upper() + "]")
+        else:
+            out.append(ch)
+    return "".join(out)
+
 def g(base, pattern):
+    pattern = _ci(pattern)
     hits = glob.glob(os.path.join(base, "**", pattern), recursive=True) \
          + glob.glob(os.path.join(base, pattern))
     return sorted(set(hits))[0] if hits else None
