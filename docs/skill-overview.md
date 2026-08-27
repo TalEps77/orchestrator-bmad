@@ -1,5 +1,5 @@
 # orchestrator-bmad — Skill Overview
-**Updated:** 2026-08-21 · twin of `skill-overview.html`
+**Updated:** 2026-08-28 · twin of `skill-overview.html`
 
 ## What it is
 
@@ -27,7 +27,7 @@ Supporting cast: typed subagent shims in `~/.claude/agents/bmad-*.md` (register 
 2  Waves .......... one BMAD phase per wave; concurrent subagents inside it
    ├─ each wave opens and closes with gate.py status
    └─ each subagent: typed bmad-* agent, invokes its bmad-* skill FIRST
-3  Story cycle .... create-story → validate-story → dev-story → code-review, per story
+3  Story cycle .... create+validate-story (one agent) → dev-story → code-review, per story
 4  Epic close ..... e2e tests · retrospective · sprint-status via the skill
 5  Wrap-up ........ close-story: tracker synced, .html twins, commit, next prompt
 6  Deploy ......... checkpoint-preview artifact → explicit approval gate
@@ -82,15 +82,33 @@ Exit 2 stops the call and feeds the reason back — the orchestrator fixes the c
 ### The story cycle — load-bearing
 
 ```
-create-story ──► validate-story ──► dev-story ──► code-review ──► done
-     │                │           ▲ hook blocks unless          │
-     └── story file   └── report  │ story file exists           │ findings?
-         on disk          on disk │ (or user waiver)            └──► back to dev-story
+create+validate-story ──► dev-story ──► code-review ──► done
+     │  (one agent)     ▲ hook blocks unless          │
+     └── story file +   │ story file exists           │ findings?
+         validation     │ (or user waiver)            └──► back to dev-story
+         report on disk
 ```
 
 - A story file on disk is the **precondition** for dev — no exceptions without a recorded user waiver.
+- Create and validate run in the **same agent** (token economy — see below); validation still happens, only the extra context reload dies.
 - One story per agent; dev and review are **separate agents**, so the reviewer never inherits the implementer's rationalizations.
 - `bmad-code-review` runs per story (it's the three-layer review: Blind Hunter, Edge Case Hunter, Acceptance Auditor); adversarial review is one lens, not a substitute.
+
+## Token economy (v3)
+
+BMAD's cost driver is context reload — every subagent re-ingests instructions and artifacts from scratch (upstream measured 80–100k tokens per step on whole-doc reads, BMAD-METHOD #1235). The skill counters it with seven rules:
+
+| Rule | Mechanic |
+|---|---|
+| Shard before spawn | PRD/architecture sharded the moment they exist; briefs name exact section files, never whole docs |
+| Slim context file | `project-context-slim.md` (≤150 lines) distilled once per epic; full doc only on demonstrated need |
+| Merge create+validate | Story/PRD creation self-validates in the same context; code review stays a separate agent |
+| Cache-aligned waves | Same agent type batched per wave → shared prompt-cache prefix at ~10% input price |
+| One-context stories | A story touching >~10 files or >1 subsystem is split before dev |
+| MCP trim | Suggest a project settings deny-list for MCP servers the work doesn't need |
+| Optionals default to skip | Non-required ledger rows run only when their trigger fires; every skip recorded |
+
+Subagent briefs additionally carry a **code-economy ladder** (ponytail-style, for dev agents: exists? in codebase? stdlib? platform? dependency? one-liner? → only then write the minimum) and **terse reporting** (caveman-style: ≤15-line telegraphic summaries; deliverables stay complete).
 
 ## Optional capabilities — judgment, recorded
 
@@ -111,7 +129,8 @@ Never required; each has a trigger. When it fires, the orchestrator considers th
 
 | Model | Use for |
 |---|---|
-| `sonnet` | mechanical well-specified work, rendering, doc generation, searches |
+| `haiku` | greps, renders, tracker sync, file moves, slim-context distillation |
+| `sonnet` | mechanical well-specified work, story creation, doc generation, standard dev stories |
 | `opus` | design-heavy work, safety-critical code, adversarial review |
 | `fable` | only when deep planning is genuinely required and worth the cost |
 
@@ -119,7 +138,7 @@ Every task description starts with the model name (`opus: adversarial review of 
 
 ## Writing a subagent task
 
-Every brief carries: **agent type** (typed `bmad-*`), **skill** to invoke first, **goal** (finished state), **inputs** (exact paths), **output contract** (where to write + summary back, never a transcript), **boundaries** (no commit/deploy by default), **propagation** (these same rules travel down to nested spawns).
+Every brief carries: **agent type** (typed `bmad-*`), **skill** to invoke first, **goal** (finished state), **inputs** (exact paths — sharded sections and the slim context file, never whole docs), **output contract** (where to write + terse summary back, never a transcript), **boundaries** (no commit/deploy by default), **code economy** (the ladder, for dev agents), **terse reporting**, **propagation** (these same rules travel down to nested spawns).
 
 ## Reporting
 

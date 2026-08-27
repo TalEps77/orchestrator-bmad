@@ -8,7 +8,10 @@ description: >-
   stories → dev → review → deploy). Covers BMAD install detection, mapping each
   phase onto a subagent that invokes its own bmad-* skill, per-agent model
   selection, task naming, scratchpad handoff, story wrap-up, and approval gates.
-  For non-BMAD orchestration use the orchestrator skill instead.
+  Enforces token economy: doc sharding before spawn, slim context handoff,
+  merged create+validate, cache-aligned waves, code-economy (ponytail-style)
+  dev briefs, and terse subagent reporting. For non-BMAD orchestration use the
+  orchestrator skill instead.
 ---
 
 # Orchestrator (BMAD)
@@ -37,6 +40,44 @@ workflow most likely to drown an orchestrator that reads its own artifacts.
 - **Scratchpad handoff.** Subagents persist findings to scratchpad `.md` files;
   downstream agents READ those files. You receive only a precise summary plus the
   file path. Never relay full content between agents yourself.
+
+## Token economy
+
+BMAD's cost driver is context reload: every subagent re-ingests instructions
+and artifacts from scratch, and upstream measured whole-doc reads at 80–100k
+tokens per step (BMAD-METHOD #1235). The method's value survives all of these
+rules; its ceremony does not get a blank check.
+
+- **Shard before spawn.** The moment a PRD or architecture doc exists, shard it
+  (`bmad-shard-doc`) — don't wait for the ~500-line hygiene threshold. Briefs
+  name exact section files: "read `prd/epic-3.md`", never "read the PRD". An
+  agent told to read a whole multi-thousand-line doc is the single most
+  expensive mistake in this workflow.
+- **Slim context file.** Once per epic, have a cheap agent distill
+  `project-context-slim.md` (≤150 lines: stack, conventions, key paths,
+  build/test commands). Subagents get the slim file by default; the full
+  `project-context.md` only when a task demonstrably needs it.
+- **Merge create+validate.** One agent creates an artifact and self-validates
+  it against the checklist in the same context — story create+validate, PRD
+  create+validate. Three sessions for one logical task is reload waste;
+  upstream calls the split "broken by design". Code review stays a SEPARATE
+  agent: reviewer independence is worth a reload, checklist validation is not.
+  Record once per project:
+  `gate.py decide validate-merge run --reason 'token economy — same-agent self-validation'`.
+- **Cache-aligned waves.** Same agent type + same skill in the same wave share
+  a prompt-cache prefix at ~10% input price. Batch like with like; don't
+  interleave agent types inside a wave.
+- **Stories sized to one context.** A story whose dev agent must re-read half
+  the repo is mis-sized. If a story touches more than ~10 files or more than
+  one subsystem, split it before dev — cheaper than the saturation spiral.
+- **Trim MCP servers.** Unused MCP servers load tool schemas into every agent.
+  For a BMAD-heavy project, suggest (once) a project `.claude/settings.json`
+  that disables servers the work doesn't need — figma, powerpoint, obsidian and
+  friends have no business in a story-dev context.
+- **Optionals default to skip.** A non-required ledger row runs only when its
+  trigger has actually fired; otherwise record the skip in one line and move
+  on. The one optional worth its reload on every story that ships code is
+  `bmad-code-review`. The ledger makes skips auditable — use it without guilt.
 
 ## BMAD workflow
 
@@ -109,14 +150,14 @@ runtime, so trust its output over this table on any conflict.
 | 1 analysis | `bmad-product-brief` or `bmad-prfaq` | | New product / new epic with unsettled scope. Skip freely for a bounded change. |
 | 1 analysis | `bmad-brainstorming`, `bmad-market-research`, `bmad-domain-research`, `bmad-technical-research` | | Optional. `bmad-technical-research` earns its cost whenever the stack choice is live. |
 | 2 planning | `bmad-prd` create | **R** | — |
-| 2 planning | `bmad-prd` validate | | Run it. It is one agent against a checklist and it has run once in nine projects. |
+| 2 planning | `bmad-prd` validate | | Merged: the SAME agent self-validates after create (see Token economy). A separate validate spawn only on user request. |
 | 2 planning | `bmad-ux` | | Mandatory when a UI is a primary surface. |
 | 3 solutioning | `bmad-create-architecture` | **R** | — |
 | 3 solutioning | `bmad-create-epics-and-stories` | **R** | — |
 | 3 solutioning | `bmad-check-implementation-readiness` | **R** | The gate before any code. Never skip it silently — a missing readiness report is what a correct-course later pays for. |
 | 4 implementation | `bmad-sprint-planning` | **R** | — |
 | 4 story cycle | `bmad-create-story` (create) | **R** | See the story-cycle rule below. |
-| 4 story cycle | `bmad-create-story` (validate) | | Run it. Zero validations exist across every project to date. |
+| 4 story cycle | `bmad-create-story` (validate) | | Merged: the SAME agent self-validates the story it just wrote (see Token economy). Validation still happens — only the extra reload dies. |
 | 4 story cycle | `bmad-dev-story` | **R** | — |
 | 4 story cycle | `bmad-code-review` | | Per story, in a fresh agent. This is the three-layer review (Blind Hunter, Edge Case Hunter, Acceptance Auditor) — `bmad-review-adversarial-general` is one of those lenses, not a substitute for the workflow. |
 | 4 story cycle | `bmad-review-edge-case-hunter` | | Add it when the story touches a state machine, money, permissions, or a data migration. |
@@ -199,7 +240,8 @@ is a decision, not a blind spot:
 
 | Model | Use for |
 |---|---|
-| `sonnet` | mechanical, well-specified work; rendering; doc generation; searches |
+| `haiku` | greps, renders, tracker sync, file moves, slim-context distillation — anything a junior with exact instructions can't get wrong |
+| `sonnet` | mechanical, well-specified work; story creation; doc generation; standard dev stories |
 | `opus` | design-heavy work, safety-critical code, adversarial review |
 | `fable` | ONLY when deep planning is genuinely required and worth the cost |
 
@@ -255,13 +297,24 @@ A subagent starts with none of your context. Give it, every time:
   file itself) and what to return: a precise summary, never a transcript.
 - **Boundaries** — what it must not touch, and whether it may commit or deploy
   (default: no).
+- **Code economy** — dev agents walk this ladder before writing ANY code: does
+  it need to exist? already in the codebase? in the stdlib? a platform feature?
+  an installed dependency? a one-liner? Only then write — the minimum. Lazy
+  about solutions, never about reading: the ladder runs after understanding the
+  change, not instead of it. Paste this ladder into every dev brief.
+- **Terse reporting** — the returned summary is telegraphic: facts, paths,
+  numbers, ≤15 lines, no pleasantries or narration. Artifacts, documents, and
+  code are written normal and complete — terseness applies to the report,
+  never the deliverable.
 - **Propagation** — if it spawns subagents of its own, it passes these same rules
   down: model picked per task, task description starting with that model name,
-  and this same brief structure. The rule repeats at the next depth.
+  and this same brief structure — code economy and terse reporting included.
+  The rule repeats at the next depth.
 
 ## Reporting
 
-- Subagents report back with a precise summary — not transcripts.
+- Subagents report back with a precise, terse summary — not transcripts, and
+  not prose. Facts, paths, numbers.
 - Finish the goal with **evidence**: commands run, measurements taken, evidence
   paths, decisions made, and residual risks.
 - "Done" claims require verification — tests green, URL returns 2xx, a rendered

@@ -40,7 +40,7 @@
 <div class="wrap">
 
 <h1>orchestrator-bmad — the skill, end to end</h1>
-<div class="sub">2026-08-21 · repo <code>TalEps77/orchestrator-bmad</code> · installed at <code>~/.claude/skills/orchestrator-bmad/</code> · twin of <code>skill-overview.md</code></div>
+<div class="sub">2026-08-28 · repo <code>TalEps77/orchestrator-bmad</code> · installed at <code>~/.claude/skills/orchestrator-bmad/</code> · twin of <code>skill-overview.md</code></div>
 
 <p>A Claude Code skill that runs the <b>BMAD-Method</b> workflow from a <b>lean orchestrator</b>: the main agent routes, synthesizes, and decides; every phase and every story executes in its own subagent. Compliance with the method is <b>mechanical</b> — a gate script and a spawn hook enforce it — not a matter of the model remembering instructions.</p>
 <p>Triggers: <i>"bmad this"</i>, <i>"use the BMAD workflow"</i>, <i>"act as orchestrator"</i> on a BMAD project, or <code>/orchestrator-bmad</code>.</p>
@@ -155,7 +155,7 @@
 2  Waves .......... one BMAD phase per wave; concurrent subagents inside it
    ├─ each wave opens and closes with gate.py status
    └─ each subagent: typed bmad-* agent, invokes its bmad-* skill FIRST
-3  Story cycle .... create-story → validate-story → dev-story → code-review, per story
+3  Story cycle .... create+validate-story (one agent) → dev-story → code-review, per story
 4  Epic close ..... e2e tests · retrospective · sprint-status via the skill
 5  Wrap-up ........ close-story: tracker synced, .html twins, commit, next prompt
 6  Deploy ......... checkpoint-preview artifact → explicit approval gate</pre>
@@ -172,13 +172,9 @@
     </marker>
   </defs>
   <g font-size="13.5" fill="#e7eaf0">
-    <rect x="20" y="80" width="165" height="64" rx="10" fill="#151a22" stroke="#6ea8fe" stroke-width="1.4"/>
-    <text x="102" y="106" text-anchor="middle" font-weight="700">create-story (CS)</text>
-    <text x="102" y="126" text-anchor="middle" fill="#98a3b6" font-size="11.5">story file → disk</text>
-
-    <rect x="225" y="80" width="170" height="64" rx="10" fill="#151a22" stroke="#6ea8fe" stroke-width="1.4"/>
-    <text x="310" y="106" text-anchor="middle" font-weight="700">validate-story (VS)</text>
-    <text x="310" y="126" text-anchor="middle" fill="#98a3b6" font-size="11.5">readiness check, cheap</text>
+    <rect x="20" y="80" width="375" height="64" rx="10" fill="#151a22" stroke="#6ea8fe" stroke-width="1.4"/>
+    <text x="207" y="106" text-anchor="middle" font-weight="700">create + validate story (CS+VS) — one agent</text>
+    <text x="207" y="126" text-anchor="middle" fill="#98a3b6" font-size="11.5">story file + validation report → disk · same context, no reload</text>
 
     <rect x="435" y="80" width="160" height="64" rx="10" fill="#1a2233" stroke="#6ea8fe" stroke-width="2"/>
     <text x="515" y="106" text-anchor="middle" font-weight="700">dev-story (DS)</text>
@@ -191,7 +187,6 @@
     <rect x="840" y="80" width="100" height="64" rx="10" fill="#16211a" stroke="#41c463" stroke-width="1.6"/>
     <text x="890" y="118" text-anchor="middle" font-weight="700" fill="#41c463">done</text>
   </g>
-  <line x1="185" y1="112" x2="221" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
   <line x1="395" y1="112" x2="431" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
   <line x1="595" y1="112" x2="631" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
   <line x1="800" y1="112" x2="836" y2="112" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#a2)"/>
@@ -204,7 +199,21 @@
   <line x1="515" y1="52" x2="515" y2="76" stroke="#f2555a" stroke-width="1.6" marker-end="url(#a2r)"/>
 </svg>
 </div>
-<div class="cap">One story per agent · dev and review are separate agents · a story file on disk is the precondition for dev — no exceptions without a recorded user waiver.</div>
+<div class="cap">One story per agent · create+validate merged into one context (token economy) · dev and review are separate agents · a story file on disk is the precondition for dev — no exceptions without a recorded user waiver.</div>
+
+<h2>Token economy (v3)</h2>
+<p>BMAD's cost driver is <b>context reload</b> — every subagent re-ingests instructions and artifacts from scratch (upstream measured 80–100k tokens per step on whole-doc reads, <a href="https://github.com/bmad-code-org/BMAD-METHOD/issues/1235" style="color:var(--acc)">BMAD-METHOD #1235</a>). The skill counters it with seven rules:</p>
+<div class="tblwrap"><table>
+<tr><th>Rule</th><th>Mechanic</th></tr>
+<tr><td><b>Shard before spawn</b></td><td>PRD/architecture sharded the moment they exist; briefs name exact section files, never whole docs</td></tr>
+<tr><td><b>Slim context file</b></td><td><code>project-context-slim.md</code> (≤150 lines) distilled once per epic; full doc only on demonstrated need</td></tr>
+<tr><td><b>Merge create+validate</b></td><td>Story/PRD creation self-validates in the same context; code review stays a separate agent</td></tr>
+<tr><td><b>Cache-aligned waves</b></td><td>Same agent type batched per wave → shared prompt-cache prefix at ~10% input price</td></tr>
+<tr><td><b>One-context stories</b></td><td>A story touching &gt;~10 files or &gt;1 subsystem is split before dev</td></tr>
+<tr><td><b>MCP trim</b></td><td>Suggest a project settings deny-list for MCP servers the work doesn't need</td></tr>
+<tr><td><b>Optionals default to skip</b></td><td>Non-required ledger rows run only when their trigger fires; every skip recorded</td></tr>
+</table></div>
+<p>Subagent briefs additionally carry a <b>code-economy ladder</b> (ponytail-style, for dev agents: exists? in codebase? stdlib? platform? dependency? one-liner? → only then write the minimum) and <b>terse reporting</b> (caveman-style: ≤15-line telegraphic summaries; deliverables stay complete).</p>
 
 <h2>gate.py — the phase-gate ledger</h2>
 <p>Required gates are <b>derived at runtime from the project's own BMAD install</b> — <code>_bmad/_config/bmad-help.csv</code> (which workflows exist, which are required), <code>_bmad/*/config.yaml</code> (where artifacts live), <code>manifest.yaml</code> (installed version). This makes the skill <b>version-agnostic</b>: renamed workflows and changed required-sets across BMAD versions are picked up automatically, per project. A hardcoded fallback covers installs missing the manifests.</p>
@@ -255,14 +264,15 @@ gate.py decide party-mode skip --reason '…' # judgment call on an optional, lo
 <h2>Model per subagent</h2>
 <div class="tblwrap"><table>
 <tr><th>Model</th><th>Use for</th></tr>
-<tr><td><code>sonnet</code></td><td>mechanical well-specified work, rendering, doc generation, searches</td></tr>
+<tr><td><code>haiku</code></td><td>greps, renders, tracker sync, file moves, slim-context distillation</td></tr>
+<tr><td><code>sonnet</code></td><td>mechanical well-specified work, story creation, doc generation, standard dev stories</td></tr>
 <tr><td><code>opus</code></td><td>design-heavy work, safety-critical code, adversarial review</td></tr>
 <tr><td><code>fable</code></td><td>only when deep planning is genuinely required and worth the cost</td></tr>
 </table></div>
 <p>Every task description starts with the model name (<code>opus: adversarial review of story 4.2</code>) — an unlabeled agent is an unauditable agent. The rule propagates to every depth of nesting.</p>
 
 <h2>Writing a subagent task</h2>
-<p>Every brief carries: <b>agent type</b> (typed <code>bmad-*</code>) · <b>skill</b> to invoke first · <b>goal</b> (finished state) · <b>inputs</b> (exact paths) · <b>output contract</b> (where to write + a summary back, never a transcript) · <b>boundaries</b> (no commit/deploy by default) · <b>propagation</b> (these same rules travel down to nested spawns).</p>
+<p>Every brief carries: <b>agent type</b> (typed <code>bmad-*</code>) · <b>skill</b> to invoke first · <b>goal</b> (finished state) · <b>inputs</b> (exact paths — sharded sections and the slim context file, never whole docs) · <b>output contract</b> (where to write + a terse summary back, never a transcript) · <b>boundaries</b> (no commit/deploy by default) · <b>code economy</b> (the ladder, for dev agents) · <b>terse reporting</b> · <b>propagation</b> (these same rules travel down to nested spawns).</p>
 
 <h2>Reporting</h2>
 <ul>
