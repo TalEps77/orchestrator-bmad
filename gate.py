@@ -113,11 +113,15 @@ def _ci(pattern):
             out.append(ch)
     return "".join(out)
 
-def g(base, pattern):
+def g_all(base, pattern):
     pattern = _ci(pattern)
     hits = glob.glob(os.path.join(base, "**", pattern), recursive=True) \
          + glob.glob(os.path.join(base, pattern))
-    return sorted(set(hits))[0] if hits else None
+    return sorted(set(hits))
+
+def g(base, pattern):
+    hits = g_all(base, pattern)
+    return hits[0] if hits else None
 
 def story_location(r):
     P = bmad_paths(r)
@@ -133,12 +137,12 @@ def story_location(r):
 # named gates: canonical checks usable via `check`, and mapped from CSV rows.
 # Each: (which resolved dir, glob patterns tried in order)
 NAMED = {
-    "prd":          ("planning", ["prd*.md", "PRD*.md", "*prd*.md"]),
+    "prd":          ("planning", ["prd*.md", "*prd*.md"]),
     "architecture": ("planning", ["*architecture*.md", "*solution-design*.md",
                                   "arch.md", "arch-*.md", "*-arch.md"]),
     "epics":        ("planning", ["*epic*.md", "*epics*"]),
     "readiness":    ("planning", ["*readiness*"]),
-    "ux":           ("planning", ["ux*", "*-ux*", "*UX*", "*ux-spec*",
+    "ux":           ("planning", ["ux*", "*-ux*", "*ux-spec*",
                                   "*user-experience*"]),
     "sprint":       ("output_folder", ["sprint-status.yaml"]),
     "retro":        ("implementation", ["*retro*"]),
@@ -186,10 +190,11 @@ def check_named(r, gate, arg=None):
     base = P.get(spec[0], P["output_folder"])
     decoy = DECOYS.get(gate)
     for pat in spec[1]:
-        hit = g(base, pat)
-        if hit and decoy and decoy.search(os.path.basename(hit).lower()):
-            continue  # e.g. research.md is not an architecture doc
-        if hit:
+        # filter decoys per HIT, not per pattern: architecture-research.md
+        # sorting before architecture.md must not hide the real doc.
+        for hit in g_all(base, pat):
+            if decoy and decoy.search(os.path.basename(hit).lower()):
+                continue  # e.g. research.md is not an architecture doc
             return hit
     return None
 
@@ -227,10 +232,21 @@ def required_gates(r):
     return out, f"bmad-help.csv (BMAD {bmad_version(r)})"
 
 def has_skip_or_waiver(led, step, arg=None):
-    key = f"{step}:{arg}" if arg else step
+    """Token-boundary matching only. Raw substring matching false-waived
+    gates: arg '2' matched a skip for story '24', step 'sprint' matched any
+    entry mentioning it. An entry matches when its step/scope equals the
+    label, the label's base, or the base's short gate alias (bmad-prd ~ prd)."""
+    base = step.split(":")[0]
+    aliases = {step, base, f"{base}:{arg}" if arg else step,
+               GATE_FOR_SKILL.get(base, base)}
     for e in led.get("skips", []) + led.get("waivers", []):
-        s = e.get("step") or e.get("scope") or ""
-        if s in (step, key) or (arg and arg in s) or step.split(":")[0] in s:
+        s = (e.get("step") or e.get("scope") or "").strip()
+        if s in aliases:
+            return e
+        # an entry with its own arg (step:arg) only matches the full key above;
+        # an argless entry waives the whole step (and its short-alias forms)
+        if ":" not in s and (GATE_FOR_SKILL.get(s) in (base, step)
+                             or GATE_FOR_SKILL.get(base) == s):
             return e
     return None
 

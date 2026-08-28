@@ -58,6 +58,27 @@ def phase_skills(r):
         pass
     return skills
 
+def has_dev_waiver(ledger_path):
+    """True only for a real entry in the waivers: list whose text mentions
+    dev/batch/epic — parsed, not sniffed from the whole file."""
+    try:
+        import yaml
+        led = yaml.safe_load(open(ledger_path, encoding="utf-8", errors="replace")) or {}
+        entries = [str(w).lower() for w in (led.get("waivers") or [])]
+    except Exception:
+        # no PyYAML: collect the lines of the waivers: block only
+        entries, inside = [], False
+        for line in open(ledger_path, encoding="utf-8", errors="replace"):
+            if re.match(r"^waivers:\s*(#.*)?$", line):
+                inside = True
+                continue
+            if inside and re.match(r"^\S", line):  # next top-level key
+                inside = False
+            if inside and (line.strip().startswith("-") or line.startswith(" ")):
+                entries.append(line.lower())
+        entries = ["".join(entries)] if entries else []
+    return any(re.search(r"dev|batch|epic", e) for e in entries)
+
 def impl_dir(r):
     """implementation_artifacts dir from _bmad/*/config.yaml, default fallback."""
     for mod in ("bmm", "core", "gds", "cis"):
@@ -96,26 +117,32 @@ def main():
     phase = phase_skills(r)
 
     # --- rule 1: typed agents for BMAD phase work -------------------------------
+    # An EMPTY subagent_type also fails: the Agent tool defaults to
+    # general-purpose, which is exactly what this rule exists to stop.
     for skill in sorted(mentioned & phase):
-        if atype and not atype.startswith("bmad-"):
+        if not atype.startswith("bmad-"):
             print(f"BLOCKED by bmad-agent-gate: '{skill}' work must run on a typed BMAD "
                   f"subagent (suggested: subagent_type='{suggest_agent(skill)}'), "
-                  f"not '{atype}'. Re-spawn with the typed agent.", file=sys.stderr)
+                  f"not '{atype or 'the default general-purpose'}'. "
+                  "Re-spawn with the typed agent.", file=sys.stderr)
             return 2
 
     # --- rule 2: dev workflow needs a story file (or explicit waiver) -----------
     if mentioned & DEV_SKILLS:
-        # waiver recorded?
+        # waiver recorded? Only an actual ENTRY under waivers: counts — the
+        # old whole-file substring sniff let an empty `waivers: []` plus any
+        # skip reason containing "dev" bypass the gate.
         for lp in glob.glob(os.path.join(r, "*", "gate-ledger.yaml")) + \
                   glob.glob(os.path.join(r, "_bmad-output", "gate-ledger.yaml")):
-            led = open(lp, encoding="utf-8", errors="replace").read().lower()
-            if "waiver" in led and ("dev" in led or "batch" in led or "epic" in led):
+            if has_dev_waiver(lp):
                 return 0
         # any .md path mentioned in the prompt that exists on disk?
         for m in re.finditer(r"[\w./ _-]+\.md", str(ti.get("prompt", ""))):
             p = m.group(0).strip()
             full = p if os.path.isabs(p) else os.path.join(r, p)
-            if os.path.exists(full) and (impl_dir(r) in full or "stor" in full.lower()
+            # \b keeps "history.md" from counting as story evidence
+            if os.path.exists(full) and (impl_dir(r) in full
+                                         or re.search(r"\bstor(y|ies)\b", full.lower())
                                          or "_bmad-output" in full):
                 return 0
         # or does any story file exist at the tracked story location?

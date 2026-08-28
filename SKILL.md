@@ -157,7 +157,7 @@ runtime, so trust its output over this table on any conflict.
 | 3 solutioning | `bmad-check-implementation-readiness` | **R** | The gate before any code. Never skip it silently — a missing readiness report is what a correct-course later pays for. |
 | 4 implementation | `bmad-sprint-planning` | **R** | — |
 | 4 story cycle | `bmad-create-story` (create) | **R** | See the story-cycle rule below. |
-| 4 story cycle | `bmad-create-story` (validate) | | Merged: the SAME agent self-validates the story it just wrote (see Token economy). Validation still happens — only the extra reload dies. |
+| 4 story cycle | `bmad-create-story` (validate) | | Merged: the SAME agent self-validates the story it just wrote (see Token economy) and WRITES the validation report to disk — `gate.py check story-validated <slug>` still needs the artifact. Only the extra reload dies. |
 | 4 story cycle | `bmad-dev-story` | **R** | — |
 | 4 story cycle | `bmad-code-review` | | Per story, in a fresh agent. This is the three-layer review (Blind Hunter, Edge Case Hunter, Acceptance Auditor) — `bmad-review-adversarial-general` is one of those lenses, not a substitute for the workflow. |
 | 4 story cycle | `bmad-review-edge-case-hunter` | | Add it when the story touches a state machine, money, permissions, or a data migration. |
