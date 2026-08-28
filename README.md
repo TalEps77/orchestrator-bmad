@@ -26,20 +26,60 @@ The fix isn't reading less. It's reading elsewhere.
 
 ```
 Check install ..... no _bmad/ ? → npx bmad-method install
-Wave 0 ............ brownfield? generate-project-context first
+Wave 0 ............ record the lane (quick/lite/full) · brownfield? generate-project-context first
 Discovery ......... investigate, gather, scope
-Planning .......... PRD (create + validate) + architecture, documented
+Planning .......... PRD (created + self-validated by the same agent) + architecture
 Solutioning ....... epics & stories + implementation-readiness gate
-Stories ........... CS → VS → DS → CR, one story file per unit of work
+Stories ........... CS+VS (one agent) → DS → CR, one story file per unit of work
 Dev ............... one agent per story, in parallel — typed bmad-agent-dev
 Review ............ code-review per story + adversarial — a different agent
-Epic close ........ e2e tests, retrospective, sprint-status via the skill
-Wrap-up ........... tracker synced, .html regenerated, committed, next prompt emitted
+Epic close ........ e2e tests, retrospective, sprint-status, .html twins rendered
+Wrap-up ........... tracker synced, committed, next prompt emitted
 Deploy ............ checkpoint-preview artifact, then an explicit approval gate
 ```
 
 Phases the task doesn't need are skipped — **but every skip is recorded in the
 gate ledger with a reason.** Nothing is skipped silently.
+
+---
+
+## Token economy
+
+BMAD's cost driver is context reload: every subagent re-ingests instructions and
+artifacts from scratch — upstream measured 80–100k tokens per step on whole-doc
+reads ([BMAD-METHOD #1235](https://github.com/bmad-code-org/BMAD-METHOD/issues/1235)).
+The skill counters it structurally:
+
+**The lane decision (wave 0).** The required-gate set was designed for full
+product development and overshoots bounded tasks. One recorded choice sizes the
+ceremony instead of N per-phase skips:
+
+```bash
+gate.py lane quick|lite|full --reason '…'
+```
+
+`quick` = `bmad-quick-dev` only (prd/architecture/epics/readiness/sprint exempt) ·
+`lite` = single epic on an existing product (readiness/ux exempt) · `full` =
+everything. `gate.py status` shows exempt gates as `~ lane: <x>` instead of
+MISSING. Escalate mid-flight by recording a new lane; never de-escalate silently.
+
+**Plus eight rules:**
+
+| Rule | Mechanic |
+|---|---|
+| Shard before spawn | Briefs name exact section files — never "read the PRD" |
+| Slim context file | `project-context-slim.md` (≤150 lines) distilled once per epic |
+| Merge create+validate | Same agent self-validates story/PRD; code review stays a separate agent |
+| Cache-aligned waves | Same agent type batched per wave → shared prompt-cache prefix at ~10% input price |
+| One-context stories | A story touching >~10 files or >1 subsystem is split before dev |
+| MCP trim | Project settings deny-list for MCP servers the work doesn't need |
+| Optionals default to skip | Non-required rows run only when their trigger fires; every skip recorded |
+| Twins at epic close | Story closes update `.md` only; `.html` twins render once per epic |
+
+Dev briefs carry a **code-economy ladder** (does it need to exist? already in
+the codebase? stdlib? platform? installed dependency? one-liner? — only then
+write the minimum), and every agent reports **terse**: facts, paths, numbers,
+≤15 lines. Deliverables stay complete; only the reports shrink.
 
 ---
 
@@ -66,8 +106,9 @@ An audit of nine real orchestrator runs found the "invoke your skill first" rule
 **`gate.py` — the phase-gate ledger.** Maintains `gate-ledger.yaml` in the project's BMAD output folder. Required gates are **derived at runtime from the project's own install** (`_bmad/_config/bmad-help.csv`) and verified against **artifacts on disk**, not against the model's memory of having run them. Renamed workflows and changed required-sets across BMAD versions (6.6 → 6.11 tested) are picked up automatically; hardcoded 6.8 conventions remain only as a fallback.
 
 ```bash
-python3 gate.py status                      # gates from the installed bmad-help.csv: done / skipped / MISSING
+python3 gate.py status                      # gates from the installed bmad-help.csv: done / skipped / lane-exempt / MISSING
 python3 gate.py doctor                      # manifests parse? workflows mapped? shims present? version drift?
+python3 gate.py lane lite --reason '…'      # size the ceremony once (quick / lite / full)
 python3 gate.py check story-validated 2-4   # precondition before spawning dev
 python3 gate.py skip readiness --reason '…' # deliberate skip, recorded
 python3 gate.py waive epic-batch-dev --reason '…'   # user-granted waiver
@@ -93,7 +134,8 @@ Optionals (`party-mode`, `market-research`, `prfaq`, `advanced-elicitation`, …
 
 | Model | Use for |
 |---|---|
-| `sonnet` | mechanical, well-specified work; rendering; doc generation; searches |
+| `haiku` | greps, renders, tracker sync, file moves, slim-context distillation |
+| `sonnet` | mechanical, well-specified work; story creation; doc generation; standard dev stories |
 | `opus` | design-heavy work, safety-critical code, adversarial review |
 | `fable` | only when deep planning is genuinely required and worth the cost |
 
@@ -134,9 +176,11 @@ A subagent starts with none of the orchestrator's context, so every task carries
 
 - **Skill** — the `bmad-*` skill to invoke as its first action
 - **Goal** — the finished state, usually one story to done
-- **Inputs** — exact paths: story file, PRD section, architecture doc, scratchpad
-- **Output contract** — where to write, and what to return (a summary, never a transcript)
+- **Inputs** — exact paths: sharded sections and the slim context file, never whole docs
+- **Output contract** — where to write, and what to return (a terse summary, never a transcript)
 - **Boundaries** — what it must not touch; may it commit or deploy (default: no)
+- **Code economy** — the ladder above, pasted into every dev brief
+- **Terse reporting** — ≤15-line telegraphic summaries; deliverables stay complete
 
 ---
 
