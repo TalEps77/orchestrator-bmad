@@ -100,7 +100,21 @@ def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 # ---------------------------------------------------- artifact-evidence checks
+def _ci(pattern):
+    """Case-insensitive glob pattern: a->[aA]. Real artifacts are named
+    ARCHITECTURE-SPINE.md and PRD.md as often as lowercase, and a
+    case-sensitive glob reports a gate MISSING while the file sits on disk —
+    which reads as 'the workflow never ran' and invites re-running it."""
+    out = []
+    for ch in pattern:
+        if ch.isalpha():
+            out.append("[" + ch.lower() + ch.upper() + "]")
+        else:
+            out.append(ch)
+    return "".join(out)
+
 def g(base, pattern):
+    pattern = _ci(pattern)
     hits = glob.glob(os.path.join(base, "**", pattern), recursive=True) \
          + glob.glob(os.path.join(base, pattern))
     return sorted(set(hits))[0] if hits else None
@@ -120,12 +134,23 @@ def story_location(r):
 # Each: (which resolved dir, glob patterns tried in order)
 NAMED = {
     "prd":          ("planning", ["prd*.md", "PRD*.md", "*prd*.md"]),
-    "architecture": ("planning", ["*architecture*.md", "*arch*.md"]),
+    "architecture": ("planning", ["*architecture*.md", "*solution-design*.md",
+                                  "arch.md", "arch-*.md", "*-arch.md"]),
     "epics":        ("planning", ["*epic*.md", "*epics*"]),
     "readiness":    ("planning", ["*readiness*"]),
-    "ux":           ("planning", ["*ux*", "*UX*"]),
+    "ux":           ("planning", ["ux*", "*-ux*", "*UX*", "*ux-spec*",
+                                  "*user-experience*"]),
     "sprint":       ("output_folder", ["sprint-status.yaml"]),
     "retro":        ("implementation", ["*retro*"]),
+}
+
+# Substring globs are how a gate goes falsely green: `*arch*.md` matches
+# `research.md`, and `*ux*` matches anything under a `linux` path. Both fired
+# on a real project. Patterns above are tightened; this is the second net —
+# a hit whose basename only matches via one of these words is not evidence.
+DECOYS = {
+    "architecture": re.compile(r"research"),
+    "ux":           re.compile(r"linux|flux|redux|crux|tux"),
 }
 
 # skill-id -> named gate, across known BMAD versions (6.6 → 6.11 renames)
@@ -159,8 +184,11 @@ def check_named(r, gate, arg=None):
     if not spec:
         return None
     base = P.get(spec[0], P["output_folder"])
+    decoy = DECOYS.get(gate)
     for pat in spec[1]:
         hit = g(base, pat)
+        if hit and decoy and decoy.search(os.path.basename(hit).lower()):
+            continue  # e.g. research.md is not an architecture doc
         if hit:
             return hit
     return None
