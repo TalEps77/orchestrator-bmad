@@ -96,7 +96,9 @@ create+validate-story ──► dev-story ──► code-review ──► done
 
 ## Token economy (v3)
 
-BMAD's cost driver is context reload — every subagent re-ingests instructions and artifacts from scratch (upstream measured 80–100k tokens per step on whole-doc reads, BMAD-METHOD #1235). The skill counters it with seven rules:
+BMAD's cost driver is context reload — every subagent re-ingests instructions and artifacts from scratch (upstream measured 80–100k tokens per step on whole-doc reads, BMAD-METHOD #1235). The skill counters it with a lane decision plus eight rules.
+
+**Lane decision (wave 0, v3.1):** the required-gate set was designed for full product development and overshoots bounded tasks. `gate.py lane quick|lite|full --reason '…'` sizes the ceremony once — one recorded choice instead of N per-phase skips. `quick` = bmad-quick-dev only (prd/architecture/epics/readiness/sprint exempt); `lite` = single epic on an existing product (readiness/ux exempt); `full` = everything. `gate.py status` shows exempt gates as `~ lane: <x>` instead of MISSING. Escalate mid-flight by recording a new lane; never de-escalate silently.
 
 | Rule | Mechanic |
 |---|---|
@@ -107,6 +109,7 @@ BMAD's cost driver is context reload — every subagent re-ingests instructions 
 | One-context stories | A story touching >~10 files or >1 subsystem is split before dev |
 | MCP trim | Suggest a project settings deny-list for MCP servers the work doesn't need |
 | Optionals default to skip | Non-required ledger rows run only when their trigger fires; every skip recorded |
+| Twins at epic close | Story closes update `.md` only; `.html` twins render once at epic close, not per story |
 
 Subagent briefs additionally carry a **code-economy ladder** (ponytail-style, for dev agents: exists? in codebase? stdlib? platform? dependency? one-liner? → only then write the minimum) and **terse reporting** (caveman-style: ≤15-line telegraphic summaries; deliverables stay complete).
 

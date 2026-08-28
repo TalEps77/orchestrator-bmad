@@ -202,7 +202,8 @@
 <div class="cap">One story per agent · create+validate merged into one context (token economy) · dev and review are separate agents · a story file on disk is the precondition for dev — no exceptions without a recorded user waiver.</div>
 
 <h2>Token economy (v3)</h2>
-<p>BMAD's cost driver is <b>context reload</b> — every subagent re-ingests instructions and artifacts from scratch (upstream measured 80–100k tokens per step on whole-doc reads, <a href="https://github.com/bmad-code-org/BMAD-METHOD/issues/1235" style="color:var(--acc)">BMAD-METHOD #1235</a>). The skill counters it with seven rules:</p>
+<p>BMAD's cost driver is <b>context reload</b> — every subagent re-ingests instructions and artifacts from scratch (upstream measured 80–100k tokens per step on whole-doc reads, <a href="https://github.com/bmad-code-org/BMAD-METHOD/issues/1235" style="color:var(--acc)">BMAD-METHOD #1235</a>). The skill counters it with a lane decision plus eight rules:</p>
+<div class="callout"><b>Lane decision (wave 0, v3.1):</b> the required-gate set was designed for full product development and overshoots bounded tasks. <code>gate.py lane quick|lite|full --reason '…'</code> sizes the ceremony once — one recorded choice instead of N per-phase skips. <code>quick</code> = bmad-quick-dev only (prd/architecture/epics/readiness/sprint exempt) · <code>lite</code> = single epic on an existing product (readiness/ux exempt) · <code>full</code> = everything. <code>gate.py status</code> shows exempt gates as <code>~ lane</code> instead of MISSING. Escalate by recording a new lane; never de-escalate silently.</div>
 <div class="tblwrap"><table>
 <tr><th>Rule</th><th>Mechanic</th></tr>
 <tr><td><b>Shard before spawn</b></td><td>PRD/architecture sharded the moment they exist; briefs name exact section files, never whole docs</td></tr>
@@ -212,6 +213,7 @@
 <tr><td><b>One-context stories</b></td><td>A story touching &gt;~10 files or &gt;1 subsystem is split before dev</td></tr>
 <tr><td><b>MCP trim</b></td><td>Suggest a project settings deny-list for MCP servers the work doesn't need</td></tr>
 <tr><td><b>Optionals default to skip</b></td><td>Non-required ledger rows run only when their trigger fires; every skip recorded</td></tr>
+<tr><td><b>Twins at epic close</b></td><td>Story closes update <code>.md</code> only; <code>.html</code> twins render once at epic close, not per story</td></tr>
 </table></div>
 <p>Subagent briefs additionally carry a <b>code-economy ladder</b> (ponytail-style, for dev agents: exists? in codebase? stdlib? platform? dependency? one-liner? → only then write the minimum) and <b>terse reporting</b> (caveman-style: ≤15-line telegraphic summaries; deliverables stay complete).</p>
 

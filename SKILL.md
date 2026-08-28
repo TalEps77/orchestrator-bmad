@@ -48,6 +48,26 @@ and artifacts from scratch, and upstream measured whole-doc reads at 80–100k
 tokens per step (BMAD-METHOD #1235). The method's value survives all of these
 rules; its ceremony does not get a blank check.
 
+### Lane decision — wave 0, before any phase work
+
+The required-gate set in `bmad-help.csv` was designed for full product
+development; for a bounded task it overshoots, and escaping it piecemeal costs
+one skip decision per phase. Size the task ONCE and record it:
+
+```bash
+gate.py lane quick|lite|full --reason '...'
+```
+
+| Lane | When | Ceremony |
+|---|---|---|
+| `quick` | One-off bounded change, no epic | `bmad-quick-dev` only — no PRD, architecture, epics, or sprint. Never inside an active sprint. |
+| `lite` | Single epic on an existing product, stack settled | PRD + epics + story cycle. Readiness and UX are lane-exempt (`gate.py status` shows them as such); an existing architecture doc satisfies its gate. |
+| `full` | New product, multi-epic, or unsettled scope | The whole method, as below. |
+
+One recorded choice replaces N per-phase skips. Escalate mid-flight if the
+task outgrows the lane — record a new lane with the reason; never de-escalate
+silently.
+
 - **Shard before spawn.** The moment a PRD or architecture doc exists, shard it
   (`bmad-shard-doc`) — don't wait for the ~500-line hygiene threshold. Briefs
   name exact section files: "read `prd/epic-3.md`", never "read the PRD". An
@@ -78,6 +98,11 @@ rules; its ceremony does not get a blank check.
   trigger has actually fired; otherwise record the skip in one line and move
   on. The one optional worth its reload on every story that ships code is
   `bmad-code-review`. The ledger makes skips auditable — use it without guilt.
+- **Twins at epic close.** Story closes update the `.md` artifacts only; the
+  `.html` twins are regenerated ONCE at epic close (or on user request), not
+  per story. This deliberately narrows the global dual-artifact rule inside
+  BMAD sessions — rendering the same tracker to HTML after every story is
+  pure output-token burn.
 
 ## BMAD workflow
 
@@ -267,8 +292,9 @@ its own tier and label none of it.
 
 ## Session flow
 
-1. **Clarify first.** Ask all your questions up front, before work starts. Once
-   they are answered, it is uninterrupted execution to completion — no mid-run
+1. **Clarify first.** Ask all your questions up front, before work starts —
+   and record the lane (`gate.py lane …`, see Token economy) before wave 1.
+   Once answered, it is uninterrupted execution to completion — no mid-run
    "shall I…?".
 2. **Execute in waves.** One BMAD phase per wave: spawn concurrent agents, then
    synthesize before opening the next phase. A wave boundary is where you think;

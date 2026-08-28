@@ -173,6 +173,21 @@ CYCLE = {"bmad-create-story", "bmad-dev-story", "bmad-build", "bmad-code-review"
 
 FALLBACK_REQUIRED = ["prd", "architecture", "epics", "readiness", "sprint"]
 
+# lane -> named gates exempted by that lane (recorded once via `gate.py lane`)
+LANE_EXEMPT = {
+    "quick": {"prd", "architecture", "epics", "readiness", "sprint"},
+    "lite":  {"readiness", "ux"},
+    "full":  set(),
+}
+
+def current_lane(led):
+    """Last recorded lane decision, or None."""
+    lane = None
+    for e in led.get("decisions", []):
+        if (e.get("step") or "") == "lane" and e.get("decision") in LANE_EXEMPT:
+            lane = e["decision"]
+    return lane
+
 def check_named(r, gate, arg=None):
     P = bmad_paths(r)
     if gate == "story":
@@ -260,9 +275,14 @@ def cmd_check(args):
         if not args.quiet:
             print(f"PASS {args.gate}{' '+args.arg if args.arg else ''}: {os.path.relpath(str(hit), r)}")
         return 0
-    e = has_skip_or_waiver(load(r), args.gate, args.arg)
+    led = load(r)
+    e = has_skip_or_waiver(led, args.gate, args.arg)
     if e:
         if not args.quiet: print(f"WAIVED {args.gate}: {e.get('reason','')}")
+        return 0
+    lane = current_lane(led)
+    if lane and args.gate in LANE_EXEMPT[lane]:
+        if not args.quiet: print(f"LANE {lane}: {args.gate} exempt")
         return 0
     if not args.quiet:
         print(f"FAIL {args.gate}{' '+args.arg if args.arg else ''}: no artifact found. "
@@ -280,6 +300,9 @@ def cmd_status(args):
     prev = led.get("bmad_version")
     if prev and prev != ver:
         print(f"  ! BMAD version changed since ledger init ({prev} → {ver}) — run gate.py doctor")
+    lane = current_lane(led)
+    if lane:
+        print(f"lane: {lane}")
     bad = 0
     for label, kind, x in gates:
         if kind == "cycle":
@@ -291,6 +314,8 @@ def cmd_status(args):
             print(f"  ✓ {label:42s} {os.path.relpath(str(hit), r)}")
         elif e:
             print(f"  ~ {label:42s} skipped: {e.get('reason','')}")
+        elif kind == "named" and lane and x in LANE_EXEMPT[lane]:
+            print(f"  ~ {label:42s} lane {lane}: exempt")
         elif kind == "unverifiable":
             print(f"  ? {label:42s} required by CSV but no declared outputs — verify manually")
         else:
@@ -410,6 +435,15 @@ def cmd_waive(args):
         {"scope": args.scope, "reason": args.reason, "by": "user", "ts": now()})
     save(r, led); print(f"recorded waiver: {args.scope} — {args.reason}"); return 0
 
+def cmd_lane(args):
+    r = root() or sys.exit("no _bmad project here")
+    led = load(r)
+    led.setdefault("decisions", []).append(
+        {"step": "lane", "decision": args.lane, "reason": args.reason, "ts": now()})
+    save(r, led)
+    ex = ", ".join(sorted(LANE_EXEMPT[args.lane])) or "none"
+    print(f"recorded lane: {args.lane} — exempt gates: {ex}"); return 0
+
 def cmd_decide(args):
     r = root() or sys.exit("no _bmad project here")
     led = load(r)
@@ -429,6 +463,8 @@ def main():
     d = sub.add_parser("decide"); d.add_argument("step")
     d.add_argument("decision", choices=["run", "skip"])
     d.add_argument("--reason", required=True); d.set_defaults(f=cmd_decide)
+    ln = sub.add_parser("lane"); ln.add_argument("lane", choices=sorted(LANE_EXEMPT))
+    ln.add_argument("--reason", required=True); ln.set_defaults(f=cmd_lane)
     st = sub.add_parser("status"); st.set_defaults(f=cmd_status)
     dr = sub.add_parser("doctor")
     dr.add_argument("--no-net", action="store_true",
