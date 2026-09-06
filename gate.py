@@ -1,477 +1,672 @@
-#!/opt/homebrew/bin/python3
-"""BMAD phase-gate ledger + deterministic checks — version-agnostic.
+#!/usr/bin/env python3
+"""Portable BMAD v4 ledger. Explicit evidence; no filename inference or network calls."""
+from __future__ import annotations
 
-The required-gate list, phase names, and artifact locations are DERIVED at
-runtime from the project's own BMAD install:
-  _bmad/_config/bmad-help.csv   -> which workflows exist, which are required
-  _bmad/_config/manifest.yaml   -> installed BMAD version
-  _bmad/*/config.yaml           -> where artifacts are written
-A hardcoded fallback (BMAD 6.8 conventions) covers installs missing those files.
+import argparse
+import contextlib
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+import tomllib
+import time
+import uuid
 
-Used two ways:
-  - by the orchestrator (per SKILL.md): status / check / skip / waive / decide / doctor
-  - by the PreToolUse hook (~/.claude/hooks/bmad-agent-gate.py) indirectly
-
-Ledger lives at <output_folder>/gate-ledger.yaml. The script, not the model,
-is the source of truth for what ran and what was skipped.
-
-Exit codes: 0 = pass/ok, 1 = gate not satisfied, 2 = usage error.
-"""
-import argparse, csv, datetime, glob, os, re, sys
-
-try:
-    import yaml
-except ImportError:
-    yaml = None
-
-# ---------------------------------------------------------------- project intro
-def root():
-    d = os.getcwd()
-    while d != "/":
-        if os.path.isdir(os.path.join(d, "_bmad")):
-            return d
-        d = os.path.dirname(d)
-    return None
-
-def bmad_version(r):
-    p = os.path.join(r, "_bmad", "_config", "manifest.yaml")
-    if os.path.exists(p):
-        m = re.search(r"^\s*version:\s*([\w.\-]+)", open(p, encoding="utf-8", errors="replace").read(), re.M)
-        if m:
-            return m.group(1)
-    return "unknown"
-
-def bmad_paths(r):
-    """Resolve artifact dirs from _bmad/*/config.yaml; fall back to defaults."""
-    out = {"output_folder": os.path.join(r, "_bmad-output")}
-    out["planning"] = os.path.join(out["output_folder"], "planning-artifacts")
-    out["implementation"] = os.path.join(out["output_folder"], "implementation-artifacts")
-    for mod in ("bmm", "core", "gds", "cis"):
-        p = os.path.join(r, "_bmad", mod, "config.yaml")
-        if not os.path.exists(p):
-            continue
-        txt = open(p, encoding="utf-8", errors="replace").read()
-        def resolve(v):
-            v = v.strip().strip("'\"").replace("{project-root}", r)
-            return v if os.path.isabs(v) else os.path.join(r, v)
-        for key, name in (("planning_artifacts", "planning"),
-                          ("implementation_artifacts", "implementation"),
-                          ("output_folder", "output_folder"),
-                          ("project_knowledge", "knowledge")):
-            m = re.search(rf"^\s*{key}:\s*(.+)$", txt, re.M)
-            if m:
-                out[name] = resolve(m.group(1))
-    return out
-
-def help_rows(r):
-    """Parse _bmad/_config/bmad-help.csv. Returns [] if absent/unparseable."""
-    p = os.path.join(r, "_bmad", "_config", "bmad-help.csv")
-    if not os.path.exists(p):
-        return []
-    try:
-        with open(p, encoding="utf-8", errors="replace") as f:
-            return [row for row in csv.DictReader(f)
-                    if (row.get("skill") or "").startswith("bmad-")]
-    except Exception:
-        return []
-
-# ---------------------------------------------------------------------- ledger
-def ledger_path(r):
-    return os.path.join(bmad_paths(r)["output_folder"], "gate-ledger.yaml")
-
-def load(r):
-    p = ledger_path(r)
-    if yaml and os.path.exists(p):
-        with open(p) as f:
-            return yaml.safe_load(f) or {}
-    return {}
-
-def save(r, data):
-    if not yaml:
-        sys.exit("PyYAML missing — run with /opt/homebrew/bin/python3")
-    p = ledger_path(r)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    data["bmad_version"] = bmad_version(r)
-    data["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
-    with open(p, "w") as f:
-        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
-
-def now():
-    return datetime.datetime.now().isoformat(timespec="seconds")
-
-# ---------------------------------------------------- artifact-evidence checks
-def _ci(pattern):
-    """Case-insensitive glob pattern: a->[aA]. Real artifacts are named
-    ARCHITECTURE-SPINE.md and PRD.md as often as lowercase, and a
-    case-sensitive glob reports a gate MISSING while the file sits on disk —
-    which reads as 'the workflow never ran' and invites re-running it."""
-    out = []
-    for ch in pattern:
-        if ch.isalpha():
-            out.append("[" + ch.lower() + ch.upper() + "]")
-        else:
-            out.append(ch)
-    return "".join(out)
-
-def g_all(base, pattern):
-    pattern = _ci(pattern)
-    hits = glob.glob(os.path.join(base, "**", pattern), recursive=True) \
-         + glob.glob(os.path.join(base, pattern))
-    return sorted(set(hits))
-
-def g(base, pattern):
-    hits = g_all(base, pattern)
-    return hits[0] if hits else None
-
-def story_location(r):
-    P = bmad_paths(r)
-    ss = g(P["output_folder"], "sprint-status.yaml")
-    if ss:
-        for line in open(ss, encoding="utf-8", errors="replace"):
-            m = re.match(r"\s*story_location:\s*(.+)", line)
-            if m:
-                loc = m.group(1).strip().strip("'\"").replace("{project-root}", r)
-                return loc if os.path.isabs(loc) else os.path.join(r, loc)
-    return P["implementation"]
-
-# named gates: canonical checks usable via `check`, and mapped from CSV rows.
-# Each: (which resolved dir, glob patterns tried in order)
-NAMED = {
-    "prd":          ("planning", ["prd*.md", "*prd*.md"]),
-    "architecture": ("planning", ["*architecture*.md", "*solution-design*.md",
-                                  "arch.md", "arch-*.md", "*-arch.md"]),
-    "epics":        ("planning", ["*epic*.md", "*epics*"]),
-    "readiness":    ("planning", ["*readiness*"]),
-    "ux":           ("planning", ["ux*", "*-ux*", "*ux-spec*",
-                                  "*user-experience*"]),
-    "sprint":       ("output_folder", ["sprint-status.yaml"]),
-    "retro":        ("implementation", ["*retro*"]),
-}
-
-# Substring globs are how a gate goes falsely green: `*arch*.md` matches
-# `research.md`, and `*ux*` matches anything under a `linux` path. Both fired
-# on a real project. Patterns above are tightened; this is the second net —
-# a hit whose basename only matches via one of these words is not evidence.
-DECOYS = {
-    "architecture": re.compile(r"research"),
-    "ux":           re.compile(r"linux|flux|redux|crux|tux"),
-}
-
-# skill-id -> named gate, across known BMAD versions (6.6 → 6.11 renames)
-GATE_FOR_SKILL = {
+VERSION = "4.0.0"
+STATE = ".bmad-orchestrator"
+ALIASES = {
     "bmad-prd": "prd", "bmad-create-prd": "prd",
     "bmad-create-architecture": "architecture", "bmad-architecture": "architecture",
     "bmad-create-epics-and-stories": "epics", "bmad-epics": "epics",
-    "bmad-check-implementation-readiness": "readiness",
-    "bmad-ux": "ux",
-    "bmad-sprint-planning": "sprint",
-    "bmad-retrospective": "retro",
+    "bmad-check-implementation-readiness": "readiness", "bmad-ux": "ux",
+    "bmad-sprint-planning": "sprint", "bmad-retrospective": "retro",
 }
-
-# per-story cycle skills: required in the CSV but not one-time gates
 CYCLE = {"bmad-create-story", "bmad-dev-story", "bmad-build", "bmad-code-review"}
+EXEMPT = {"quick": {"prd", "architecture", "epics", "readiness", "sprint", "ux"},
+          "lite": {"readiness", "ux"}, "full": set()}
+PHASE_WORKFLOWS = {"dev": {"bmad-dev-story", "bmad-build", "bmad-quick-dev"},
+                   "review": {"bmad-code-review"}}
 
-FALLBACK_REQUIRED = ["prd", "architecture", "epics", "readiness", "sprint"]
 
-# lane -> named gates exempted by that lane (recorded once via `gate.py lane`)
-LANE_EXEMPT = {
-    "quick": {"prd", "architecture", "epics", "readiness", "sprint"},
-    "lite":  {"readiness", "ux"},
-    "full":  set(),
-}
+class GateError(Exception):
+    pass
 
-def current_lane(led):
-    """Last recorded lane decision, or None."""
-    lane = None
-    for e in led.get("decisions", []):
-        if (e.get("step") or "") == "lane" and e.get("decision") in LANE_EXEMPT:
-            lane = e["decision"]
-    return lane
 
-def check_named(r, gate, arg=None):
-    P = bmad_paths(r)
-    if gate == "story":
-        if arg and os.path.exists(arg):
-            return arg
-        base = story_location(r)
-        return arg and (g(base, f"*{arg}*.md") or g(P["output_folder"], f"*{arg}*.md"))
-    if gate == "story-validated":
-        return arg and g(P["output_folder"], f"*{arg}*valid*")
-    if gate == "code-review":
-        return arg and (g(P["output_folder"], f"*{arg}*review*"))
-    spec = NAMED.get(gate)
-    if not spec:
-        return None
-    base = P.get(spec[0], P["output_folder"])
-    decoy = DECOYS.get(gate)
-    for pat in spec[1]:
-        # filter decoys per HIT, not per pattern: architecture-research.md
-        # sorting before architecture.md must not hide the real doc.
-        for hit in g_all(base, pat):
-            if decoy and decoy.search(os.path.basename(hit).lower()):
-                continue  # e.g. research.md is not an architecture doc
-            return hit
-    return None
+def need(condition, message):
+    if not condition:
+        raise GateError(message)
 
-def generic_glob_from_outputs(r, outputs):
-    """Best-effort check for a required workflow this script doesn't know:
-    glob the first meaningful keyword of its declared outputs everywhere."""
-    words = re.findall(r"[a-z]{4,}", (outputs or "").lower())
-    if not words:
-        return None
-    return g(bmad_paths(r)["output_folder"], f"*{words[0]}*")
 
-def required_gates(r):
-    """[(label, kind, checker-args)] derived from the installed bmad-help.csv;
-    kind: named | cycle | generic | unverifiable. Fallback = 6.8 conventions."""
-    rows = help_rows(r)
-    if not rows:
-        return [(x, "named", x) for x in FALLBACK_REQUIRED], "fallback (no bmad-help.csv)"
-    out, seen = [], set()
-    for row in rows:
-        if (row.get("required") or "").strip().lower() != "true":
-            continue
-        skill = row["skill"].strip()
-        action = (row.get("action") or "").strip()
-        label = skill + (f":{action}" if action else "")
-        if label in seen:
-            continue
-        seen.add(label)
-        if skill in CYCLE:
-            out.append((label, "cycle", None))
-        elif skill in GATE_FOR_SKILL:
-            out.append((label, "named", GATE_FOR_SKILL[skill]))
-        else:
-            outputs = (row.get("outputs") or "").strip()
-            out.append((label, "generic" if outputs else "unverifiable", outputs or None))
-    return out, f"bmad-help.csv (BMAD {bmad_version(r)})"
+def identifier(value):
+    need(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", value),
+         "IDs use 1-96 letters, digits, dots, underscores or hyphens")
+    return value
 
-def has_skip_or_waiver(led, step, arg=None):
-    """Token-boundary matching only. Raw substring matching false-waived
-    gates: arg '2' matched a skip for story '24', step 'sprint' matched any
-    entry mentioning it. An entry matches when its step/scope equals the
-    label, the label's base, or the base's short gate alias (bmad-prd ~ prd)."""
-    base = step.split(":")[0]
-    aliases = {step, base, f"{base}:{arg}" if arg else step,
-               GATE_FOR_SKILL.get(base, base)}
-    for e in led.get("skips", []) + led.get("waivers", []):
-        s = (e.get("step") or e.get("scope") or "").strip()
-        if s in aliases:
-            return e
-        # an entry with its own arg (step:arg) only matches the full key above;
-        # an argless entry waives the whole step (and its short-alias forms)
-        if ":" not in s and (GATE_FOR_SKILL.get(s) in (base, step)
-                             or GATE_FOR_SKILL.get(base) == s):
-            return e
-    return None
 
-# -------------------------------------------------------------------- commands
-def cmd_check(args):
-    r = root()
-    if not r:
-        print("no _bmad project here"); return 0
-    hit = check_named(r, args.gate, args.arg)
-    if hit:
-        if not args.quiet:
-            print(f"PASS {args.gate}{' '+args.arg if args.arg else ''}: {os.path.relpath(str(hit), r)}")
-        return 0
-    led = load(r)
-    e = has_skip_or_waiver(led, args.gate, args.arg)
-    if e:
-        if not args.quiet: print(f"WAIVED {args.gate}: {e.get('reason','')}")
-        return 0
-    lane = current_lane(led)
-    if lane and args.gate in LANE_EXEMPT[lane]:
-        if not args.quiet: print(f"LANE {lane}: {args.gate} exempt")
-        return 0
-    if not args.quiet:
-        print(f"FAIL {args.gate}{' '+args.arg if args.arg else ''}: no artifact found. "
-              f"Run the workflow, or record: gate.py skip {args.gate} --reason '...'")
-    return 1
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-def cmd_status(args):
-    r = root()
-    if not r:
-        print("no _bmad project here"); return 0
-    led = load(r)
-    gates, source = required_gates(r)
-    ver = bmad_version(r)
-    print(f"project: {os.path.basename(r)}  ·  BMAD {ver}  ·  gates from {source}")
-    prev = led.get("bmad_version")
-    if prev and prev != ver:
-        print(f"  ! BMAD version changed since ledger init ({prev} → {ver}) — run gate.py doctor")
-    lane = current_lane(led)
-    if lane:
-        print(f"lane: {lane}")
-    bad = 0
-    for label, kind, x in gates:
-        if kind == "cycle":
-            print(f"  ○ {label:42s} per-story cycle — enforced per spawn, not here")
-            continue
-        hit = check_named(r, x) if kind == "named" else generic_glob_from_outputs(r, x)
-        e = None if hit else has_skip_or_waiver(led, label)
-        if hit:
-            print(f"  ✓ {label:42s} {os.path.relpath(str(hit), r)}")
-        elif e:
-            print(f"  ~ {label:42s} skipped: {e.get('reason','')}")
-        elif kind == "named" and lane and x in LANE_EXEMPT[lane]:
-            print(f"  ~ {label:42s} lane {lane}: exempt")
-        elif kind == "unverifiable":
-            print(f"  ? {label:42s} required by CSV but no declared outputs — verify manually")
-        else:
-            print(f"  ✗ {label:42s} MISSING")
-            bad += 1
-    for sec in ("skips", "waivers", "decisions"):
-        for e in led.get(sec, []):
-            print(f"  [{sec[:-1]}] {e.get('step') or e.get('scope')}: {e.get('decision','skip')} — {e.get('reason','')}")
-    if bad:
-        print(f"{bad} required gate(s) unaccounted for — run them or record a skip.")
-    if led or not bad:
-        save(r, led)  # stamp version on first contact
-    return 1 if bad else 0
 
-def latest_published(timeout=10):
-    """Latest bmad-method version on npm, or None (offline / npm missing / slow).
-    Read-only: never installs, never writes."""
-    import subprocess
+def root(value=None):
+    p = Path(value or os.getcwd()).resolve()
+    if value:
+        need(p.is_dir(), "Project root is not a directory")
+        return p
+    for candidate in (p, *p.parents):
+        if (candidate / "_bmad").is_dir() or (candidate / STATE).is_dir():
+            return candidate
+    raise GateError("No BMAD project found; pass --root PATH explicitly")
+
+
+def path_in(project, value):
+    p = (project / value).resolve()
+    need(p.is_relative_to(project), f"Path escapes project: {value}")
+    return p
+
+
+def file_ref(project, value, nonempty=True):
+    p = path_in(project, value)
+    need(p.is_file(), f"Missing file: {value}")
+    if nonempty:
+        need(p.stat().st_size > 0, f"Empty file: {value}")
+    return {"path": p.relative_to(project).as_posix(), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+
+
+def snapshot(project, files):
+    need(isinstance(files, list) and all(isinstance(x, str) for x in files), "files must be a list of paths")
+    result = []
+    for name in sorted(set(files)):
+        p = path_in(project, name)
+        need(not p.is_dir(), f"Source is a directory: {name}")
+        result.append({"path": p.relative_to(project).as_posix(),
+                       "sha256": hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None})
+    return result
+
+
+def fresh(project, refs):
+    return snapshot(project, [x["path"] for x in refs]) == sorted(refs, key=lambda x: x["path"])
+
+
+def contract_refs(project, story):
+    """BMAD SPEC companions are requirements, not optional context compression."""
+    import yaml
+    spec = path_in(project, story["spec"])
+    text = spec.read_text(encoding="utf-8-sig")
+    companions = []
+    if text.startswith("---\n") or text.startswith("---\r\n"):
+        match = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.S)
+        need(match is not None, "Unclosed spec frontmatter")
+        try:
+            header = yaml.safe_load(match[1]) or {}
+        except yaml.YAMLError as e:
+            raise GateError(f"Invalid spec frontmatter: {e}") from e
+        need(isinstance(header, dict), "Spec frontmatter must be a mapping")
+        companions = header.get("companions", [])
+        need(isinstance(companions, list) and all(isinstance(p, str) and p.strip() for p in companions),
+             "Spec companions must be a list of relative file paths")
+    files = [story["spec"], *story.get("context", [])]
+    for name in companions:
+        need(not Path(name).is_absolute(), "Spec companions must be relative to the spec")
+        files.append(str(spec.parent / name))
+    refs = [file_ref(project, p) for p in files]
+    return snapshot(project, [r["path"] for r in refs])
+
+
+def read_json(p):
     try:
-        out = subprocess.run(["npm", "view", "bmad-method", "version"],
-                             capture_output=True, text=True, timeout=timeout)
-        v = out.stdout.strip()
-        return v if re.match(r"^\d+\.\d+\.\d+", v) else None
-    except Exception:
-        return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise GateError(f"Cannot read JSON {p}: {e}") from e
 
-def vtuple(v):
-    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3]) or (0,)
 
-def sprint_in_progress(r):
-    """True if any story/epic is mid-flight — an update should wait for epic close."""
-    ss = g(bmad_paths(r)["output_folder"], "sprint-status.yaml")
-    if not ss:
-        return False
-    txt = open(ss, encoding="utf-8", errors="replace").read()
-    return bool(re.search(r":\s*(in-progress|ready-for-dev|review)\s*$", txt, re.M))
+def atomic_json(p, data):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=p.name + ".", suffix=".tmp", dir=p.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, p)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
-def cmd_doctor(args):
-    """Cross-check this script's assumptions against the installed BMAD."""
-    r = root()
-    if not r:
-        print("no _bmad project here"); return 0
-    ver = bmad_version(r)
-    rows = help_rows(r)
-    P = bmad_paths(r)
-    print(f"BMAD {ver} at {os.path.relpath(os.path.join(r,'_bmad'), r)}")
-    print(f"paths: planning={os.path.relpath(P['planning'], r)}  "
-          f"implementation={os.path.relpath(P['implementation'], r)}  "
-          f"output={os.path.relpath(P['output_folder'], r)}")
-    issues = 0
-    if not rows:
-        print("  ! bmad-help.csv missing/unparseable — running on hardcoded 6.8 fallback")
-        issues += 1
-    else:
-        known = set(GATE_FOR_SKILL) | CYCLE
-        for row in rows:
-            if (row.get("required") or "").strip().lower() == "true" and row["skill"] not in known:
-                print(f"  ! required workflow '{row['skill']}' unknown to gate.py "
-                      f"(new in this BMAD version?) — checked generically via outputs='{row.get('outputs','')}'")
-                issues += 1
-    # shim coverage: every spawnable agent type referenced in _bmad has a shim
-    agents_dir = os.path.expanduser("~/.claude/agents")
-    types = set()
-    for dirpath, _, files in os.walk(os.path.join(r, "_bmad")):
-        for fn in files:
-            if not fn.endswith((".md", ".xml", ".yaml", ".csv")):
-                continue
+
+class Store:
+    def __init__(self, project):
+        self.project = project
+        self.path = project / STATE / "ledger.json"
+
+    def read(self):
+        need(self.path.is_file(), "No v4 ledger. Run init; legacy YAML is never auto-approved or overwritten")
+        d = read_json(self.path)
+        need(isinstance(d, dict) and d.get("schema_version") == 4 and isinstance(d.get("runs"), dict),
+             "Invalid ledger schema; restore a known good copy, do not reset it")
+        return d
+
+    @contextlib.contextmanager
+    def transaction(self, create=False):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock = self.path.parent / "write.lock"
+        deadline = time.monotonic() + 10
+        while True:
             try:
-                txt = open(os.path.join(dirpath, fn), encoding="utf-8", errors="replace").read()
-            except Exception:
+                lock.mkdir()
+                break
+            except FileExistsError:
+                need(time.monotonic() < deadline, f"Ledger busy: {lock}. Check writers before recovering a stale lock")
+                time.sleep(0.05)
+        try:
+            data = self.read() if self.path.exists() else None
+            need(data is not None or create, "No v4 ledger. Run init first")
+            data = data if data is not None else {"schema_version": 4, "runs": {}}
+            yield data
+            atomic_json(self.path, data)
+        finally:
+            lock.rmdir()
+
+
+def sprint_active(project):
+    """Inspect standard/configured BMAD output trackers; unfamiliar layouts stay a host check."""
+    import yaml
+    bases = {project / "_bmad-output"}
+    for cfg in (project / "_bmad").glob("*/config.yaml"):
+        raw = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        need(isinstance(raw, dict), f"Invalid BMAD config: {cfg}")
+        for key in ("output_folder", "implementation_artifacts"):
+            value = raw.get(key)
+            if isinstance(value, str):
+                value = value.replace("{project-root}", str(project))
+                need("{" not in value, f"Unresolved path in {cfg}: {key}")
+                bases.add(path_in(project, value))
+    for cfg in (project / "_bmad" / "config.toml", project / "_bmad" / "config.user.toml"):
+        if cfg.is_file():
+            raw = tomllib.loads(cfg.read_text(encoding="utf-8"))
+            for group in raw.values():
+                if isinstance(group, dict):
+                    for key in ("output_folder", "implementation_artifacts"):
+                        value = group.get(key)
+                        if isinstance(value, str):
+                            value = value.replace("{project-root}", str(project))
+                            need("{" not in value, f"Unresolved path in {cfg}: {key}")
+                            bases.add(path_in(project, value))
+    for base in bases:
+        for tracker in base.rglob("sprint-status.yaml"):
+            raw = yaml.safe_load(tracker.read_text(encoding="utf-8")) or {}
+            def active(value):
+                if isinstance(value, dict):
+                    return any(active(x) for x in value.values())
+                if isinstance(value, list):
+                    return any(active(x) for x in value)
+                return value in ("in-progress", "ready-for-dev", "review")
+            if active(raw):
+                return True
+    return False
+
+
+def metadata(project):
+    try:
+        import yaml
+    except ImportError as e:
+        raise GateError("PyYAML is required for BMAD manifests: python -m pip install -r requirements.txt") from e
+    config = project / "_bmad" / "_config"
+    need(config.is_dir(), "BMAD is not installed here. Install its Claude Code or Codex integration first")
+    manifest = config / "manifest.yaml"
+    help_file = config / "bmad-help.csv"
+    need(manifest.is_file() and help_file.is_file(), "BMAD manifest.yaml or bmad-help.csv missing; repair the install")
+    try:
+        raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        need(isinstance(raw, dict), "BMAD manifest must be a mapping")
+        version = raw.get("installation", {}).get("version") if isinstance(raw.get("installation"), dict) else None
+        version = version or raw.get("version")
+        need(isinstance(version, (str, float, int)), "BMAD version is missing")
+        with help_file.open(encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        skills = {}
+        required = set()
+        for row in rows:
+            skill = (row.get("skill") or row.get("command") or "").strip().lstrip("/")
+            if not skill.startswith("bmad-"):
                 continue
-            types.update(m.group(0).lower() for m in
-                         re.finditer(r"bmad-(?:agent|review)-[a-z][a-z-]*[a-z]", txt))
-    for t in sorted(types):
-        if not os.path.exists(os.path.join(agents_dir, t + ".md")):
-            print(f"  ! missing subagent shim: ~/.claude/agents/{t}.md")
-            issues += 1
-    led = load(r)
-    prev = led.get("bmad_version")
-    if prev and prev != ver:
-        print(f"  ! ledger was written under BMAD {prev}; now {ver} — review skips for renamed workflows")
-        issues += 1
-    # version check — REPORT ONLY. Never updates: an update rewrites tracked
-    # files (.claude/skills, .agents/skills, .bak) and can change workflow
-    # semantics mid-sprint, so the decision belongs to the user.
-    if not args.no_net:
-        latest = latest_published()
-        if latest and ver != "unknown" and vtuple(latest) > vtuple(ver):
-            mid = sprint_in_progress(r)
-            print(f"  ! update available: {ver} → {latest}")
-            if mid:
-                print("    sprint in progress — recommend updating at epic close, not now")
+            skills[skill] = ALIASES.get(skill, skill)
+            if str(row.get("required", "")).lower().strip() == "true" and skill not in CYCLE:
+                required.add(skills[skill])
+        need(skills, "No BMAD workflows found in bmad-help.csv; unsupported manifest schema")
+    except (ValueError, OSError, yaml.YAMLError) as e:
+        raise GateError(f"Invalid BMAD metadata: {e}") from e
+    refs = [file_ref(project, manifest), file_ref(project, help_file)]
+    refs += [file_ref(project, p) for p in sorted((project / "_bmad").glob("*/config.yaml"))]
+    refs += [file_ref(project, p) for p in (project / "_bmad").glob("config*.toml")]
+    refs += [file_ref(project, p) for p in (project / "_bmad" / "custom").rglob("*.toml")]
+    return {"version": str(version), "refs": refs, "skills": skills, "required": sorted(required)}
+
+
+def run_of(data, run_id):
+    identifier(run_id)
+    need(run_id in data["runs"], f"Unknown run: {run_id}")
+    return data["runs"][run_id]
+
+
+def story_of(run, story_id):
+    need(story_id in run["stories"], f"Unknown story: {story_id}")
+    return run["stories"][story_id]
+
+
+def event(run, action, **details):
+    run["events"].append({"at": now(), "action": action, **details})
+
+
+def version_ok(project, run):
+    need(metadata_current(project, run), "BMAD manifests changed: doctor, review compatibility, then ack-version")
+
+
+def metadata_current(project, run):
+    return sorted(metadata(project)["refs"], key=lambda x: x["path"]) == sorted(run["bmad"]["refs"], key=lambda x: x["path"])
+
+
+def evidence_ok(project, record):
+    return bool(record and record["verdict"] == "pass" and not record["blockers"]
+                and fresh(project, record["refs"]) and fresh(project, record["sources"]))
+
+
+def waived(project, run, gate, story=None):
+    # Exact scope. Never inspect the reason text or import previous-run waivers.
+    return any(w["gate"] == gate and w.get("story") == story and not w.get("revoked")
+               and fresh(project, w.get("sources", [])) for w in run["waivers"])
+
+
+def exemptions(run):
+    return EXEMPT[run["lane"]] - set(run.get("extra_required", []))
+
+
+def gate_ok(project, run, gate, story=None):
+    if story is None:
+        return evidence_ok(project, run["gates"].get(gate)) or waived(project, run, gate)
+    s = story_of(run, story)
+    if gate == "story":
+        return path_in(project, s["file"]).is_file() and path_in(project, s["spec"]).is_file()
+    if gate == "done":
+        return (s["closed"] and planning_ok(project, run)
+                and gate_ok(project, run, "story-validated", story) and gate_ok(project, run, "dev", story)
+                and gate_ok(project, run, "code-review", story)
+                and all(gate_ok(project, run, "done", dep) for dep in s["depends"]))
+    return evidence_ok(project, s["gates"].get(gate)) or waived(project, run, gate, story)
+
+
+def planning_ok(project, run):
+    return all(x in exemptions(run) or gate_ok(project, run, x) for x in run["required"])
+
+
+def plan_ready(project, run):
+    missing = [x for x in run["required"] if x not in exemptions(run) and not gate_ok(project, run, x)]
+    need(not missing, "Planning gates missing/stale: " + ", ".join(missing))
+
+
+def load_report(project, report_path, workflow=None, actor=None, require_checks=False):
+    report = read_json(path_in(project, report_path))
+    need(isinstance(report, dict) and report.get("schema_version") == 1, "Report schema_version must be 1")
+    for field in ("actor", "workflow", "summary"):
+        need(isinstance(report.get(field), str) and report[field].strip(), f"Report needs {field}")
+    need(report.get("verdict") in ("pass", "fail"), "Report verdict must be pass or fail")
+    need(isinstance(report.get("blockers"), list), "Report needs blockers list (empty when none)")
+    if actor:
+        need(report["actor"] == actor, "Report actor does not match the reserved attempt")
+    if workflow:
+        need(report["workflow"] == workflow, "Report workflow does not match the reserved attempt")
+    need(report["verdict"] != "pass" or not report["blockers"], "A pass cannot contain blockers")
+    paths = report.get("evidence")
+    need(isinstance(paths, list) and paths and all(isinstance(x, str) for x in paths), "Report needs evidence file paths")
+    refs = [file_ref(project, report_path)] + [file_ref(project, p) for p in paths]
+    checks = report.get("checks", [])
+    need(isinstance(checks, list), "checks must be a list")
+    if require_checks and report["verdict"] == "pass":
+        need(checks, "Passing dev work needs runnable verification with a saved log")
+    for check in checks:
+        need(isinstance(check, dict) and isinstance(check.get("command"), str) and check["command"].strip()
+             and type(check.get("exit_code")) is int, "Each check needs command and integer exit_code")
+        refs.append(file_ref(project, check.get("log", "")))
+        need(report["verdict"] != "pass" or check["exit_code"] == 0, "A failing check cannot produce a pass")
+    return {"verdict": report["verdict"], "actor": report["actor"], "workflow": report["workflow"],
+            "summary": report["summary"], "blockers": report["blockers"], "refs": refs,
+            "sources": [], "recorded": now()}, report
+
+
+def check_ticket(project, data, ticket):
+    matches = [(r, a) for r in data["runs"].values() for a in r["attempts"].values() if a["id"] == ticket]
+    need(len(matches) == 1, "Unknown attempt ticket")
+    run, attempt = matches[0]
+    need(attempt["state"] == "active", "Attempt is no longer active")
+    version_ok(project, run)
+    need(fresh(project, attempt["inputs"]), "Attempt inputs changed; cancel and reserve again")
+    # Dev may legitimately extend a dependency's code. Acceptance stays frozen;
+    # affected dependencies must be revalidated before final close, not mid-edit.
+    if attempt["phase"] == "dev":
+        plan_ready(project, run)
+        need(gate_ok(project, run, "story-validated", attempt["story"]), "Story validation is missing/stale")
+    else:
+        need(gate_ok(project, run, "dev", attempt["story"]), "Dev evidence is missing/stale")
+    return run, attempt
+
+
+def execute(args):
+    project = root(args.root)
+    store = Store(project)
+    cmd = args.cmd
+    if cmd == "fingerprint":
+        return snapshot(project, args.file), False
+    if cmd == "doctor":
+        info = metadata(project)
+        issues = []
+        if store.path.exists():
+            data = store.read()
+            for run_id, run in data["runs"].items():
+                if not metadata_current(project, run):
+                    issues.append(f"{run_id}: BMAD metadata drift; review then ack-version")
+        return {"version": VERSION, "bmad": info["version"], "workflows": sorted(info["skills"]),
+                "required": info["required"], "issues": issues, "read_only": True}, bool(issues)
+    if cmd in ("status", "check", "history"):
+        data = store.read()
+        run = run_of(data, args.run)
+        version_ok(project, run)
+        if cmd == "history":
+            return run["events"], False
+        if cmd == "check":
+            need(args.gate in run["required"] or args.gate in run["gates"] or args.gate in
+                 ("story", "story-validated", "dev", "code-review", "done"), "Unknown gate")
+            ok = gate_ok(project, run, args.gate, args.story)
+            return {"gate": args.gate, "story": args.story, "pass": ok}, not ok
+        gates = {g: ("exempt" if g in exemptions(run) else "pass" if gate_ok(project, run, g) else "missing/stale")
+                 for g in run["required"]}
+        stories = {sid: {g: gate_ok(project, run, g, sid) for g in ("story-validated", "dev", "code-review", "done")}
+                   for sid in run["stories"]}
+        active = [a["id"] for a in run["attempts"].values() if a["state"] == "active"]
+        return {"run": args.run, "lane": run["lane"], "gates": gates, "stories": stories,
+                "active": active, "waivers": run["waivers"], "usage_samples": len(run["usage"])}, False
+    if cmd == "packet":
+        data = store.read()
+        run = run_of(data, args.run)
+        version_ok(project, run)
+        story = story_of(run, args.story)
+        files = list(dict.fromkeys([r["path"] for r in contract_refs(project, story)] + [story["file"], *args.input]))
+        refs = [file_ref(project, p) for p in files]
+        content = "\n\n".join(f"FILE: {ref['path']}\n" + path_in(project, ref["path"]).read_text(encoding="utf-8") for ref in refs)
+        need(len(content) <= args.max_chars, f"Packet is {len(content)} characters; budget {args.max_chars}. Select smaller sections; nothing was truncated")
+        packet = {"run": args.run, "story": args.story, "sources": refs, "characters": len(content),
+                  "estimated_tokens": (len(content) + 3) // 4, "estimate_method": "characters/4; not a tokenizer or bill",
+                  "content": content}
+        out = path_in(project, args.output)
+        need(out not in [path_in(project, p) for p in files] and out != store.path, "Packet output must not overwrite an input or ledger")
+        atomic_json(out, packet)
+        return {k: v for k, v in packet.items() if k != "content"} | {"output": str(out)}, False
+
+    with store.transaction(create=cmd == "init") as data:
+        if cmd == "init":
+            identifier(args.run)
+            need(args.run not in data["runs"], "Run already exists; resume it or choose a new run ID")
+            info = metadata(project)
+            need(args.lane != "quick" or not sprint_active(project), "An active sprint cannot use quick; use lite/full")
+            run = {"id": args.run, "lane": args.lane, "reason": args.reason,
+                   "bmad": info, "required": info["required"], "extra_required": [], "gates": {}, "stories": {},
+                   "attempts": {}, "waivers": [], "events": [], "usage": [],
+                   "max_active": args.max_active, "max_attempts": args.max_attempts}
+            need(args.max_active > 0 and args.max_attempts > 0, "Budgets must be positive")
+            data["runs"][args.run] = run
+            event(run, "init", lane=args.lane, reason=args.reason)
+            return {"run": args.run, "lane": args.lane}, False
+        run = run_of(data, args.run)
+        if cmd == "ack-version":
+            need(not any(a["state"] == "active" for a in run["attempts"].values()), "Finish/cancel active attempts before acknowledging drift")
+            run["bmad"] = metadata(project)
+            run["required"] = sorted(set(run["required"]) | set(run["bmad"]["required"]))
+            # Prior success must be reassessed against the changed workflows.
+            run["gates"] = {}
+            run["waivers"] = []
+            for s in run["stories"].values():
+                s["gates"] = {}
+                s["closed"] = False
+            event(run, cmd, reason=args.reason)
+            return {"acknowledged": True, "evidence_requires_rerecording": True}, False
+        if cmd != "cancel":
+            version_ok(project, run)
+        if cmd == "lane":
+            order = {"quick": 0, "lite": 1, "full": 2}
+            need(order[args.lane] >= order[run["lane"]], "Do not downgrade an active run; start a new scoped run")
+            run["lane"] = args.lane
+            event(run, cmd, lane=args.lane, reason=args.reason)
+        elif cmd == "require":
+            identifier(args.gate)
+            run["required"] = sorted(set(run["required"]) | {args.gate})
+            run["extra_required"] = sorted(set(run["extra_required"]) | {args.gate})
+            event(run, cmd, gate=args.gate, reason=args.reason)
+        elif cmd == "story":
+            identifier(args.story)
+            need(args.story not in run["stories"], "Story ID already registered; use a new ID for a replacement spec")
+            story_ref = file_ref(project, args.file)
+            spec_ref = file_ref(project, args.spec)
+            need(story_ref["path"] != spec_ref["path"], "Use a separate stable acceptance spec; BMAD may update story lifecycle notes")
+            for dep in args.depends:
+                need(dep in run["stories"] and dep != args.story, f"Register dependency first: {dep}")
+            run["stories"][args.story] = {"file": story_ref["path"], "spec": spec_ref["path"],
+                                         "context": args.input, "depends": args.depends, "gates": {}, "closed": False}
+            contract_refs(project, run["stories"][args.story])
+            event(run, cmd, story=args.story)
+        elif cmd == "waive":
+            allowed = set(run["required"]) if args.story is None else {"story-validated", "code-review"}
+            need(args.gate in allowed, "Waiver must name an exact required gate or a scoped story validation/review")
+            sources = []
+            if args.story:
+                s = story_of(run, args.story)
+                sources = contract_refs(project, s)
+                if args.gate == "code-review":
+                    need(gate_ok(project, run, "dev", args.story), "Review waiver requires current dev evidence")
+                    sources = s["gates"]["dev"]["sources"]
+            need(args.approval.strip(), "Waiver needs an actual user approval reference/quote")
+            run["waivers"].append({"gate": args.gate, "story": args.story, "reason": args.reason,
+                                   "approval": args.approval, "at": now(),
+                                   "sources": sources})
+            event(run, cmd, gate=args.gate, story=args.story, reason=args.reason)
+        elif cmd == "record":
+            if args.story:
+                s = story_of(run, args.story)
+                need(args.gate == "story-validated", "Dev/review reports require start + finish")
+                allowed = {"bmad-create-story", "bmad-quick-dev", "bmad-spec", "bmad-build"} & run["bmad"]["skills"].keys()
+                sources = contract_refs(project, s)
+                target = s["gates"]
             else:
-                print("    no sprint in progress — safe point to update, ask the user first")
-            print(f"    npx -y bmad-method@latest install --directory . --action quick-update -y")
-            print("    then re-run: gate.py doctor   (regenerates IDE skill dirs — dirties git)")
-            issues += 1
-        elif latest and ver == latest:
-            print(f"  BMAD {ver} is the latest published version")
-    if not issues:
-        print("  OK — manifests parsed, all required workflows mapped, shims present, version stable")
-    save(r, led)
-    return 1 if issues else 0
+                need(args.gate in run["required"] or args.gate in ALIASES.values(), "Register an additional gate with require first")
+                allowed = {k for k, v in run["bmad"]["skills"].items() if v == args.gate}
+                # Explicitly required project gates (e.g. integration) use an available workflow.
+                allowed = allowed or set(run["bmad"]["skills"])
+                sources = snapshot(project, args.source)
+                need(sources, "Planning evidence needs --source paths to detect stale requirements")
+                target = run["gates"]
+            record, report = load_report(project, args.report)
+            need(report.get("run") == args.run and report.get("story") == args.story,
+                 "Report run/story identity mismatch")
+            need(record["workflow"] in allowed, "Report must identify an applicable installed BMAD workflow")
+            record["sources"] = sources
+            target[args.gate] = record
+            event(run, cmd, gate=args.gate, story=args.story, verdict=record["verdict"])
+        elif cmd == "start":
+            s = story_of(run, args.story)
+            need(args.actor.strip(), "Actor must identify an actual agent/session")
+            need(not s["closed"], "Story is closed; use reopen with a reason")
+            need(args.workflow in run["bmad"]["skills"] and args.workflow in PHASE_WORKFLOWS[args.phase], "Choose an installed workflow for this phase")
+            if args.phase == "dev":
+                if run["lane"] == "quick":
+                    need(args.workflow in ("bmad-quick-dev", "bmad-build"), "Use installed quick-dev or build for quick work")
+                else:
+                    need(args.workflow != "bmad-quick-dev", "quick-dev cannot bypass lite/full story work")
+            plan_ready(project, run)
+            need(gate_ok(project, run, "story", args.story), "Story/spec files missing")
+            if args.phase == "dev":
+                for dep in s["depends"]:
+                    need(gate_ok(project, run, "done", dep), f"Dependency is not done/current: {dep}")
+            active = [a for r in data["runs"].values() for a in r["attempts"].values() if a["state"] == "active"]
+            need(len(active) < run["max_active"], "Project active-attempt budget reached; finish/cancel existing work")
+            need(not any(a["story"] == args.story and a["run"] == args.run for a in active), "Story already has an active attempt")
+            previous = [a for a in run["attempts"].values() if a["story"] == args.story and a["phase"] == args.phase]
+            need(len(previous) < run["max_attempts"], "Attempt budget reached: diagnose, then extend-budget with a reason")
+            dependency_sources = []
+            if args.phase == "dev":
+                need(gate_ok(project, run, "story-validated", args.story), "Story validation missing/stale")
+                inputs = contract_refs(project, s)
+                for dep in s["depends"]:
+                    prerequisite = story_of(run, dep)
+                    inputs.extend(contract_refs(project, prerequisite))
+                    dependency_sources.extend(r["path"] for r in prerequisite["gates"]["dev"]["sources"])
+                inputs = snapshot(project, [x["path"] for x in inputs])
+                s["gates"].pop("dev", None)
+                s["gates"].pop("code-review", None)
+            else:
+                need(gate_ok(project, run, "dev", args.story), "Dev evidence missing/stale")
+                need(s["gates"]["dev"]["actor"] != args.actor, "Reviewer must be a different agent/session from the developer")
+                inputs = s["gates"]["dev"]["sources"]
+            ticket = uuid.uuid4().hex
+            run["attempts"][ticket] = {"id": ticket, "run": args.run, "story": args.story, "phase": args.phase,
+                                        "actor": args.actor, "model": args.model, "workflow": args.workflow,
+                                        "dependency_sources": sorted(set(dependency_sources)),
+                                        "state": "active", "inputs": inputs, "started": now()}
+            event(run, cmd, ticket=ticket, story=args.story, phase=args.phase)
+            return {"ticket": ticket, "marker": "BMAD_TICKET:" + ticket}, False
+        elif cmd == "accept-review":
+            s = story_of(run, args.story)
+            need(not s["closed"], "Story is closed; use reopen with a reason")
+            need(not any(a["state"] == "active" and a["story"] == args.story for a in run["attempts"].values()), "Finish active story work before accepting native review")
+            need(gate_ok(project, run, "dev", args.story), "Dev evidence missing/stale")
+            dev = s["gates"]["dev"]
+            need(dev["workflow"] == "bmad-build", "Only a completed Build attempt can supply native review; use start/finish for standalone review")
+            record, report = load_report(project, args.report)
+            need(report.get("parent_ticket") == dev.get("ticket") and bool(dev.get("ticket")), "Native review must identify its completed Build parent ticket")
+            need(report.get("run") == args.run and report.get("story") == args.story, "Report run/story identity mismatch")
+            need(record["actor"] != s["gates"]["dev"]["actor"], "Native review must identify a different actual agent/session")
+            need(record["workflow"] in {"bmad-build", "bmad-code-review"} & run["bmad"]["skills"].keys(), "Use an installed native review workflow")
+            sources = s["gates"]["dev"]["sources"]
+            need(report.get("reviewed_sources") == sources, "Native reviewer must attest the exact reviewed source fingerprints")
+            record["sources"] = sources
+            s["gates"]["code-review"] = record
+            event(run, cmd, story=args.story, verdict=record["verdict"])
+        elif cmd == "finish":
+            checked_run, a = check_ticket(project, data, args.ticket)
+            need(checked_run is run, "Ticket belongs to a different run")
+            s = story_of(run, a["story"])
+            record, report = load_report(project, args.report, a["workflow"], a["actor"], a["phase"] == "dev")
+            record["ticket"] = a["id"]
+            need(report.get("run") == args.run and report.get("story") == a["story"], "Report run/story identity mismatch")
+            if a["phase"] == "dev":
+                files = report.get("files", [])
+                need(files or report.get("no_changes_reason"), "Dev report must list changed/checked files or explain no changes")
+                record["sources"] = snapshot(project, [x["path"] for x in a["inputs"]] + a.get("dependency_sources", []) + files)
+                gate = "dev"
+            else:
+                record["sources"] = a["inputs"]
+                gate = "code-review"
+            s["gates"][gate] = record
+            a["state"] = record["verdict"]
+            event(run, cmd, ticket=args.ticket, verdict=record["verdict"])
+        elif cmd == "cancel":
+            need(args.ticket in run["attempts"], "Unknown attempt")
+            a = run["attempts"][args.ticket]
+            need(a["state"] == "active", "Attempt is already inactive")
+            a["state"] = "cancelled"
+            event(run, cmd, ticket=args.ticket, reason=args.reason)
+        elif cmd in ("close", "reopen"):
+            s = story_of(run, args.story)
+            need(not any(a["state"] == "active" and a["story"] == args.story for a in run["attempts"].values()), "Story has active work")
+            if cmd == "close":
+                plan_ready(project, run)
+                for dep in s["depends"]:
+                    need(gate_ok(project, run, "done", dep), f"Revalidate affected dependency before close: {dep}")
+                for gate in ("story-validated", "dev", "code-review"):
+                    need(gate_ok(project, run, gate, args.story), f"Cannot close: {gate} missing/stale")
+                s["closed"] = True
+            else:
+                s["closed"] = False
+                s["gates"].pop("dev", None)
+                s["gates"].pop("code-review", None)
+            event(run, cmd, story=args.story, reason=getattr(args, "reason", None))
+        elif cmd == "extend-budget":
+            need(args.max_attempts > run["max_attempts"], "New budget must exceed the old one")
+            run["max_attempts"] = args.max_attempts
+            event(run, cmd, max_attempts=args.max_attempts, reason=args.reason)
+        elif cmd == "decide":
+            event(run, cmd, step=args.step, decision=args.decision, reason=args.reason)
+        elif cmd == "usage":
+            sample = read_json(path_in(project, args.file))
+            need(isinstance(sample, dict) and sample.get("source") in ("host", "estimate"), "usage source must be host or estimate")
+            need(isinstance(sample.get("sample_id"), str) and sample["sample_id"], "usage needs a unique sample_id")
+            need(not any(x["sample_id"] == sample["sample_id"] for x in run["usage"]), "Duplicate usage sample")
+            for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+                v = sample.get(key)
+                need(v is None or (type(v) is int and v >= 0), f"Invalid {key}; use null for unknown")
+            run["usage"].append(sample)
+            event(run, cmd, sample_id=sample["sample_id"])
+        else:
+            raise GateError("Unknown command")
+    return {"recorded": cmd, "run": args.run}, False
 
-def cmd_skip(args):
-    r = root() or sys.exit("no _bmad project here")
-    led = load(r)
-    led.setdefault("skips", []).append(
-        {"step": args.step + (f":{args.arg}" if args.arg else ""),
-         "reason": args.reason, "ts": now()})
-    save(r, led); print(f"recorded skip: {args.step} — {args.reason}"); return 0
 
-def cmd_waive(args):
-    r = root() or sys.exit("no _bmad project here")
-    led = load(r)
-    led.setdefault("waivers", []).append(
-        {"scope": args.scope, "reason": args.reason, "by": "user", "ts": now()})
-    save(r, led); print(f"recorded waiver: {args.scope} — {args.reason}"); return 0
+def parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--root", help="Project root; otherwise search parents")
+    p.add_argument("--version", action="version", version=VERSION)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    def command(name, run=True, reason=False, story=False):
+        c = sub.add_parser(name)
+        if run:
+            c.add_argument("--run", required=True)
+        if reason:
+            c.add_argument("--reason", required=True)
+        if story:
+            c.add_argument("--story", required=True)
+        return c
+    command("doctor", run=False)
+    c = command("fingerprint", run=False); c.add_argument("--file", nargs="+", required=True)
+    c = command("init", reason=True); c.add_argument("--lane", required=True, choices=EXEMPT)
+    c.add_argument("--max-active", type=int, default=3); c.add_argument("--max-attempts", type=int, default=3)
+    command("status"); command("history"); command("ack-version", reason=True)
+    c = command("lane", reason=True); c.add_argument("--lane", required=True, choices=EXEMPT)
+    c = command("require", reason=True); c.add_argument("--gate", required=True)
+    c = command("check"); c.add_argument("gate"); c.add_argument("--story")
+    c = command("story", story=True); c.add_argument("--file", required=True); c.add_argument("--spec", required=True)
+    c.add_argument("--depends", nargs="*", default=[])
+    c.add_argument("--input", nargs="*", default=[], help="Additional stable requirement files; SPEC frontmatter companions are included automatically")
+    c = command("waive", reason=True); c.add_argument("--gate", required=True); c.add_argument("--story")
+    c.add_argument("--approval", required=True)
+    c = command("record"); c.add_argument("gate"); c.add_argument("--story"); c.add_argument("--report", required=True)
+    c.add_argument("--source", nargs="*", default=[])
+    c = command("start", story=True); c.add_argument("--phase", required=True, choices=PHASE_WORKFLOWS)
+    c.add_argument("--actor", required=True); c.add_argument("--workflow", required=True); c.add_argument("--model", default="inherited")
+    c = command("accept-review", story=True); c.add_argument("--report", required=True)
+    c = command("finish"); c.add_argument("--ticket", required=True); c.add_argument("--report", required=True)
+    c = command("cancel", reason=True); c.add_argument("--ticket", required=True)
+    command("close", story=True); command("reopen", story=True, reason=True)
+    c = command("extend-budget", reason=True); c.add_argument("--max-attempts", type=int, required=True)
+    c = command("decide", reason=True); c.add_argument("--step", required=True); c.add_argument("--decision", choices=("run", "skip"), required=True)
+    c = command("packet", story=True); c.add_argument("--input", nargs="*", default=[])
+    c.add_argument("--output", required=True); c.add_argument("--max-chars", type=int, default=32000)
+    c = command("usage"); c.add_argument("--file", required=True)
+    return p
 
-def cmd_lane(args):
-    r = root() or sys.exit("no _bmad project here")
-    led = load(r)
-    led.setdefault("decisions", []).append(
-        {"step": "lane", "decision": args.lane, "reason": args.reason, "ts": now()})
-    save(r, led)
-    ex = ", ".join(sorted(LANE_EXEMPT[args.lane])) or "none"
-    print(f"recorded lane: {args.lane} — exempt gates: {ex}"); return 0
 
-def cmd_decide(args):
-    r = root() or sys.exit("no _bmad project here")
-    led = load(r)
-    led.setdefault("decisions", []).append(
-        {"step": args.step, "decision": args.decision, "reason": args.reason, "ts": now()})
-    save(r, led); print(f"recorded decision: {args.step} = {args.decision}"); return 0
+def main(argv=None):
+    try:
+        args = parser().parse_args(argv)
+        if hasattr(args, "reason"):
+            need(args.reason.strip(), "A nonempty reason is required")
+        result, failed = execute(args)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return int(failed)
+    except (GateError, OSError, KeyError, TypeError, ValueError) as e:
+        print(f"BLOCKED: {e}", file=sys.stderr)
+        return 1
 
-def main():
-    ap = argparse.ArgumentParser(prog="gate.py")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("check"); c.add_argument("gate"); c.add_argument("arg", nargs="?")
-    c.add_argument("--quiet", action="store_true"); c.set_defaults(f=cmd_check)
-    s = sub.add_parser("skip"); s.add_argument("step"); s.add_argument("arg", nargs="?")
-    s.add_argument("--reason", required=True); s.set_defaults(f=cmd_skip)
-    w = sub.add_parser("waive"); w.add_argument("scope")
-    w.add_argument("--reason", required=True); w.set_defaults(f=cmd_waive)
-    d = sub.add_parser("decide"); d.add_argument("step")
-    d.add_argument("decision", choices=["run", "skip"])
-    d.add_argument("--reason", required=True); d.set_defaults(f=cmd_decide)
-    ln = sub.add_parser("lane"); ln.add_argument("lane", choices=sorted(LANE_EXEMPT))
-    ln.add_argument("--reason", required=True); ln.set_defaults(f=cmd_lane)
-    st = sub.add_parser("status"); st.set_defaults(f=cmd_status)
-    dr = sub.add_parser("doctor")
-    dr.add_argument("--no-net", action="store_true",
-                    help="skip the npm version check (offline / fast path)")
-    dr.set_defaults(f=cmd_doctor)
-    a = ap.parse_args()
-    sys.exit(a.f(a))
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

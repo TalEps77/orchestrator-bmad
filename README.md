@@ -1,241 +1,136 @@
-# 🏗️ Orchestrator (BMAD)
+# Orchestrator (BMAD) · v4.0.0
 
-**Drive the [BMAD-Method](https://github.com/bmad-code-org/BMAD-METHOD) workflow from a lean control plane — inside [Claude Code](https://claude.com/claude-code).**
+Run BMAD product development with a shared skill for **Codex and Claude Code**.
+Keep coordination small, give workers relevant context, and close work only with
+explicit, current evidence. This package is a skill plus local Python helpers;
+it does not run an LLM service or replace BMAD.
 
-A skill that makes the main agent an orchestrator for BMAD projects: it routes, synthesizes, and decides, while each phase and each story runs in its own subagent that invokes its own `bmad-*` skill. The main context never fills with PRDs, story files, and review reports — so the routing stays sharp through an entire epic.
+## What changed from v3
 
----
+- Shared instructions plus one host adapter; no universal Claude tool names,
+  Homebrew paths, or model aliases.
+- Exact run/story IDs and structured pass/fail reports replace filename globs.
+- Source/evidence fingerprints invalidate stale success. Independent review
+  identity, dependency completion, and bounded attempts are checked explicitly.
+- Atomic locked ledger updates; status/doctor are read-only and offline.
+- Small context packets, targeted retries, scoped code simplicity and concise
+  internal reports. No mandatory HTML twins or delegate-every-command rule.
+- Catalog-aware routing covers old story workflows and native Build/spec,
+  including required spec companions and reuse of independent native review.
+- Project installers, optional role templates, a Claude launch hook, and a
+  reproducible Python regression suite.
 
-## Why BMAD needs this most
+See [design and migration](docs/v4-design.md), [workflow overview](docs/skill-overview.md),
+and [validation scope](docs/validation.md). Previous releases remain in Git.
 
-BMAD is document-heavy by design: a PRD, an architecture doc, a story file per unit of work, a review report per story. That is exactly the material that destroys a main thread — every artifact read inline is context you don't get back, and BMAD sessions are long.
+## Requirements
 
-The fix isn't reading less. It's reading elsewhere.
+- Python 3.11+ and `PyYAML>=6.0.2,<7` (declared in `requirements.txt`).
+- An installed [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD)
+  integration for the host you use. Install/configure it in the target project;
+  the orchestrator never silently upgrades it.
+- Codex or Claude Code with skill support and local command execution.
+  Delegation is useful for independent review; if unavailable, report that gap.
 
-| | Inline BMAD run | Orchestrated BMAD run |
-|---|---|---|
-| PRD / architecture docs | Read into the session context | Read by the agent that needs them, then discarded |
-| Stories | One at a time, in the main thread | Fanned out, one agent per story |
-| Dev + review | Same context — reviewer inherits the implementer's reasoning | Separate agents; the reviewer starts clean |
-| Model | One for everything | Chosen per agent, per phase |
-| Late-epic judgment | Degraded | Intact |
+## Install in a project
 
----
+The `v4.0.0` release branch identifies this version; it is not a GitHub Release
+object. Clone it into a separate source checkout and install its dependency
+in your Python environment. A virtual environment is recommended.
 
-## The workflow
-
-```
-Check install ..... no _bmad/ ? → npx bmad-method install
-Wave 0 ............ record the lane (quick/lite/full) · brownfield? generate-project-context first
-Discovery ......... investigate, gather, scope
-Planning .......... PRD (created + self-validated by the same agent) + architecture
-Solutioning ....... epics & stories + implementation-readiness gate
-Stories ........... CS+VS (one agent) → DS → CR, one story file per unit of work
-Dev ............... one agent per story, in parallel — typed bmad-agent-dev
-Review ............ code-review per story + adversarial — a different agent
-Epic close ........ e2e tests, retrospective, sprint-status, .html twins rendered
-Wrap-up ........... tracker synced, committed, next prompt emitted
-Deploy ............ checkpoint-preview artifact, then an explicit approval gate
-```
-
-Phases the task doesn't need are skipped — **but every skip is recorded in the
-gate ledger with a reason.** Nothing is skipped silently.
-
----
-
-## Token economy
-
-BMAD's cost driver is context reload: every subagent re-ingests instructions and
-artifacts from scratch — upstream measured 80–100k tokens per step on whole-doc
-reads ([BMAD-METHOD #1235](https://github.com/bmad-code-org/BMAD-METHOD/issues/1235)).
-The skill counters it structurally:
-
-**The lane decision (wave 0).** The required-gate set was designed for full
-product development and overshoots bounded tasks. One recorded choice sizes the
-ceremony instead of N per-phase skips:
-
-```bash
-gate.py lane quick|lite|full --reason '…'
+```sh
+git clone --branch v4.0.0 https://github.com/TalEps77/orchestrator-bmad.git
+cd orchestrator-bmad
+python -m pip install -r requirements.txt
 ```
 
-`quick` = `bmad-quick-dev` only (prd/architecture/epics/readiness/sprint exempt) ·
-`lite` = single epic on an existing product (readiness/ux exempt) · `full` =
-everything. `gate.py status` shows exempt gates as `~ lane: <x>` instead of
-MISSING. Escalate mid-flight by recording a new lane; never de-escalate silently.
+Preview first; add `--apply` to write:
 
-**Plus eight rules:**
+```sh
+python install.py --platform codex --project /path/to/project --agents
+python install.py --platform codex --project /path/to/project --agents --apply
 
-| Rule | Mechanic |
-|---|---|
-| Shard before spawn | Briefs name exact section files — never "read the PRD" |
-| Slim context file | `project-context-slim.md` (≤150 lines) distilled once per epic |
-| Merge create+validate | Same agent self-validates story/PRD; code review stays a separate agent |
-| Cache-aligned waves | Same agent type batched per wave → shared prompt-cache prefix at ~10% input price |
-| One-context stories | A story touching >~10 files or >1 subsystem is split before dev |
-| MCP trim | Project settings deny-list for MCP servers the work doesn't need |
-| Optionals default to skip | Non-required rows run only when their trigger fires; every skip recorded |
-| Twins at epic close | Story closes update `.md` only; `.html` twins render once per epic |
-
-Dev briefs carry a **code-economy ladder** (does it need to exist? already in
-the codebase? stdlib? platform? installed dependency? one-liner? — only then
-write the minimum), and every agent reports **terse**: facts, paths, numbers,
-≤15 lines. Deliverables stay complete; only the reports shrink.
-
----
-
-## Every subagent invokes its BMAD skill first
-
-Each agent's **first action** is calling the relevant skill by name:
-
-`bmad-create-story` · `bmad-dev-story` · `bmad-code-review` · `bmad-correct-course` · `bmad-investigate` · `bmad-review-adversarial-general` · `bmad-sprint-planning` · `bmad-retrospective`
-
-(`bmad-help` first, when the right one isn't obvious.)
-
-An agent that skips this improvises the method instead of following it — which looks like BMAD in the transcript and isn't in the artifacts.
-
-**One story per agent**, and dev separated from adversarial review, so the reviewer never inherits the implementer's rationalizations.
-
-Phase work is spawned on **typed BMAD subagents** (`bmad-agent-dev`, `bmad-agent-pm`, `bmad-agent-architect`, `bmad-review-adversarial-general`, …) — never `general-purpose`. A generic agent asked to "run bmad-dev-story" is the failure mode the enforcement layer exists to stop.
-
----
-
-## Mechanical enforcement — not prose
-
-An audit of nine real orchestrator runs found the "invoke your skill first" rule held in **one**. Prose doesn't survive long sessions; scripts do. Two pieces ship with the skill:
-
-**`gate.py` — the phase-gate ledger.** Maintains `gate-ledger.yaml` in the project's BMAD output folder. Required gates are **derived at runtime from the project's own install** (`_bmad/_config/bmad-help.csv`) and verified against **artifacts on disk**, not against the model's memory of having run them. Renamed workflows and changed required-sets across BMAD versions (6.6 → 6.11 tested) are picked up automatically; hardcoded 6.8 conventions remain only as a fallback.
-
-```bash
-python3 gate.py status                      # gates from the installed bmad-help.csv: done / skipped / lane-exempt / MISSING
-python3 gate.py doctor                      # manifests parse? workflows mapped? shims present? version drift?
-python3 gate.py lane lite --reason '…'      # size the ceremony once (quick / lite / full)
-python3 gate.py check story-validated 2-4   # precondition before spawning dev
-python3 gate.py skip readiness --reason '…' # deliberate skip, recorded
-python3 gate.py waive epic-batch-dev --reason '…'   # user-granted waiver
-python3 gate.py decide party-mode skip --reason '…' # judgment on an optional
+python install.py --platform claude --project /path/to/project --hook
+python install.py --platform claude --project /path/to/project --hook --apply
 ```
 
-**`hooks/bmad-agent-gate.py` — a PreToolUse hook** on the Agent tool. Registered in `~/.claude/settings.json`, it physically blocks two spawns in any `_bmad` project:
+`--agents` installs four project roles. Claude `--hook` includes those roles and
+merges its PreToolUse entry with existing project settings. Without `--hook`, the
+same explicit ledger CLI works in either host. Codex gets no automatic hook.
+Templates inherit configured models instead of choosing unsupported defaults.
+The host may constrain agent definitions or model controls; consult its adapter.
+On Windows use the available `python`/`py` executable and actual project paths.
 
-1. BMAD phase work on a `general-purpose`/`Explore` agent → blocked, suggests the typed agent.
-2. A dev-workflow spawn (`bmad-dev-story` / 6.11's `bmad-build`) with no story file on disk and no recorded waiver → blocked.
-
-Exit 2 stops the spawn and feeds the reason back to the model. Fail-open on internal errors — enforcement is best-effort, the work is not. Non-BMAD projects fast-exit at zero cost.
-
----
-
-## Optional capabilities — judgment, recorded
-
-Optionals (`party-mode`, `market-research`, `prfaq`, `advanced-elicitation`, …) each carry a trigger in the skill. When the trigger fires, the orchestrator considers the capability and records the call with `gate.py decide` — one line, so skipping is a decision, not a blind spot.
-
----
-
-## Model per subagent
-
-| Model | Use for |
-|---|---|
-| `haiku` | greps, renders, tracker sync, file moves, slim-context distillation |
-| `sonnet` | mechanical, well-specified work; story creation; doc generation; standard dev stories |
-| `opus` | design-heavy work, safety-critical code, adversarial review |
-| `fable` | only when deep planning is genuinely required and worth the cost |
-
-Every task description **starts with the model name** — that string is what shows in the background-tasks panel:
-
-```
-opus: adversarial review of story 4.2
-sonnet: create story 4.3 from the PRD
-fable: plan the epic-5 architecture split
-```
-
-An unlabeled agent is an unauditable agent.
-
-This holds at every depth. A subagent that spawns its own subagents picks *their*
-models from the same table — it is not stuck at its own tier — and labels their
-tasks the same way. Subagents inherit nothing, so the rule has to travel in the
-task brief.
-
----
-
-## How a session runs
-
-```
-1  Clarify ....... every question asked up front — then uninterrupted execution
-2  Wave .......... one BMAD phase per wave, concurrent agents inside it
-3  Synthesize .... read summaries, not transcripts; open the next phase
-4  Verify ........ "done" needs tests green / 2xx / a screenshot
-```
-
-- **Track and resume.** Agents killed by usage limits go on a list and get resumed when the window resets — never restarted from scratch.
-- **Approval gates.** Deploys, migrations, deletes, real messages, `git push`, real spend — each asked separately. Never two irreversible steps behind one approval.
-
----
-
-## Writing a subagent task
-
-A subagent starts with none of the orchestrator's context, so every task carries:
-
-- **Skill** — the `bmad-*` skill to invoke as its first action
-- **Goal** — the finished state, usually one story to done
-- **Inputs** — exact paths: sharded sections and the slim context file, never whole docs
-- **Output contract** — where to write, and what to return (a terse summary, never a transcript)
-- **Boundaries** — what it must not touch; may it commit or deploy (default: no)
-- **Code economy** — the ladder above, pasted into every dev brief
-- **Terse reporting** — ≤15-line telegraphic summaries; deliverables stay complete
-
----
-
-## Install
-
-```bash
-git clone https://github.com/TalEps77/orchestrator-bmad.git ~/.claude/skills/orchestrator-bmad
-```
-
-Or copy `SKILL.md` + `gate.py` into `~/.claude/skills/orchestrator-bmad/`.
-
-To arm the spawn gate, copy the hook and register it:
-
-```bash
-cp hooks/bmad-agent-gate.py ~/.claude/hooks/
-```
-
-```json
-{ "hooks": { "PreToolUse": [ { "matcher": "Agent|Task", "hooks": [
-  { "type": "command", "command": "python3 \"$HOME/.claude/hooks/bmad-agent-gate.py\"", "timeout": 10 }
-] } ] } }
-```
-
-The skill works without the hook — you just lose the hard block and fall back to the ledger discipline alone.
-
-BMAD itself is installed per project, and the skill checks for it before starting:
-
-```bash
-npx bmad-method install
-```
-
----
+Differing existing files block installation. After inspecting the dry run, add
+`--upgrade` to preserve them under `.bmad-orchestrator-backups/` and install the
+new files. The installer changes only the selected project's skill, requested
+roles, and optional Claude hook entry. It never changes global configuration.
+Remove an old v3 standalone hook registration when moving to v4; don't run both.
 
 ## Use
 
-Just ask, in plain language:
+In Codex, request `$orchestrator-bmad`; in Claude Code, `/orchestrator-bmad`.
+For example:
 
-> "bmad this feature"
-> "use the BMAD workflow to ship the billing epic"
-> "act as orchestrator and run the stories in parallel"
+> Use orchestrator-bmad to build this system from the agreed requirements.
+> Start with full planning, then implement and independently review its stories.
 
-The skill auto-triggers on those. Or invoke it directly:
+The skill chooses quick/lite/full according to scope and uses only the selected
+host adapter. To inspect a project directly:
 
+```sh
+python /path/to/installed/skill/gate.py --root /project doctor
+python /path/to/installed/skill/gate.py --root /project status --run my-run
 ```
-/orchestrator-bmad
+
+See the [CLI and report contract](references/ledger.md) for initialization,
+validation, start/finish/close, context packets, recovery, and usage samples.
+
+## What is enforced
+
+| Capability | Codex | Claude Code |
+|---|---|---|
+| Shared workflow and reports | Yes | Yes |
+| Explicit CLI preflight, fingerprint and completion checks | Yes | Yes |
+| Managed dev/review attempt and retry limits | Yes, through CLI | Yes, through CLI |
+| Native launch interception | Not supplied; parent calls CLI | Optional Agent/Task PreToolUse hook |
+| Automatic proof that a skill/test really ran | No | No |
+| Model selection and worker availability | Host-dependent | Host-dependent |
+
+This is a cooperative evidence ledger, not a security sandbox. Actor IDs, command
+results and file lists are assertions that the parent/reviewer must verify.
+Hashes establish freshness; they do not establish correctness. Reviewers check
+the full diff/file list. Host permission controls remain authoritative.
+
+## Token policy
+
+Preserve the main context without assuming that more agents means fewer tokens.
+Use focused packets, bounded workers and relevant regression checks. Prefer
+existing code and platform capabilities; preserve accepted functionality.
+Compress internal reports, not requirements or correctness. Ponytail and Caveman
+were considered as scoped influences, not installed as global modes; see the
+[phase policy](references/economy.md).
+
+The package makes no measured cost-reduction claim. Host token counters may be
+stored with their provenance; packet estimates use characters/4 and are not
+billing measurements. Cache hits depend on the actual runtime and prompt prefix.
+
+## Development and rollback
+
+```sh
+python -m unittest discover -s tests -v
+python gate.py --version
 ```
 
----
+To inspect the old release without altering this checkout:
 
-## When *not* to use it
+```sh
+git worktree add ../orchestrator-bmad-v3 v3.1.0
+```
 
-If the project isn't running BMAD-Method — or you want a fleet of agents without its phases, story files, and review gates — use [orchestrator](https://github.com/TalEps77/orchestrator) instead. For a single edit or a quick question, skip orchestration entirely.
+Keep the v4 ledger and reports when rolling back. v3 uses its legacy YAML; v4 uses
+`.bmad-orchestrator/ledger.json`. Neither format is silently converted into
+successful evidence. Reinstall the chosen version's files/roles/hooks together;
+see [migration and rollback](docs/v4-design.md#release-and-rollback).
 
----
-
-## License
-
-MIT
+MIT license. Third-party projects linked above retain their own licenses.
