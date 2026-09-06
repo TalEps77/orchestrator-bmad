@@ -1,166 +1,67 @@
-#!/opt/homebrew/bin/python3
-"""PreToolUse hook on Agent/Task: deterministic BMAD spawn gate — version-agnostic.
+#!/usr/bin/env python3
+"""Claude Code PreToolUse Agent/Task adapter for explicitly managed v4 projects.
 
-Blocks (exit 2, stderr fed back to the model) when, in a _bmad project:
-  1. A BMAD phase task is being spawned on a generic agent type
-     (general-purpose/Explore) instead of a typed bmad-* subagent.
-  2. A dev-workflow spawn (bmad-dev-story / bmad-build) has no story file
-     on disk and no recorded waiver.
-
-Phase-work skill names are derived from the project's own
-_bmad/_config/skill-manifest.csv, so renames across BMAD versions
-(e.g. 6.8 bmad-create-architecture -> 6.11 bmad-architecture,
-6.11's new bmad-build) are picked up automatically. A curated set
-covers installs missing the manifest.
-
-Fast-exits 0 for everything else. Never crashes the session: any internal
-error exits 0 (fail-open) — enforcement is best-effort, work is not.
+This gates a reserved launch, not subsequent skill invocation or every file edit.
+Non-managed projects are untouched. Managed internal errors block with diagnostics.
+Register this file IN the installed skill; do not copy it out of the package.
 """
-import csv, glob, json, os, re, sys
+import json
+from pathlib import Path
+import re
+import sys
 
-# skills that are phase work when the manifest is unavailable (6.6–6.11 names)
-CURATED_PHASE = {
-    "bmad-dev-story", "bmad-build", "bmad-create-story", "bmad-code-review",
-    "bmad-prd", "bmad-create-prd", "bmad-create-architecture", "bmad-architecture",
-    "bmad-create-epics-and-stories", "bmad-ux",
-    "bmad-review-adversarial-general", "bmad-review-edge-case-hunter",
-}
-# regex that classifies a manifest skill id as phase work (survives renames)
-PHASE_RE = re.compile(
-    r"^bmad-(dev-story|build|create-story|code-review|prd|create-prd|"
-    r"create-architecture|architecture|create-epics-and-stories|epics|ux|review-.+)$")
-# dev workflows that require a story file
-DEV_SKILLS = {"bmad-dev-story", "bmad-build"}
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import gate
 
-def suggest_agent(skill):
-    if re.search(r"review", skill):
-        shim = os.path.expanduser(f"~/.claude/agents/{skill}.md")
-        return skill if os.path.exists(shim) else "bmad-review-adversarial-general"
-    if re.search(r"dev-story|build|create-story|code-review", skill):
-        return "bmad-agent-dev"
-    if re.search(r"architecture", skill):
-        return "bmad-agent-architect"
-    if re.search(r"ux", skill):
-        return "bmad-agent-ux-designer"
-    return "bmad-agent-pm"  # prd / epics / planning
+TYPES = {"bmad-worker": "dev", "bmad-reviewer": "review", "bmad-planner": "plan",
+         "bmad-researcher": "plan"}
 
-def phase_skills(r):
-    """Phase-work skill ids for THIS project's installed BMAD version."""
-    skills = set(CURATED_PHASE)
-    p = os.path.join(r, "_bmad", "_config", "skill-manifest.csv")
-    try:
-        with open(p, encoding="utf-8", errors="replace") as f:
-            for row in csv.DictReader(f):
-                cid = (row.get("canonicalId") or row.get("name") or "").strip()
-                if cid and PHASE_RE.match(cid):
-                    skills.add(cid)
-    except Exception:
-        pass
-    return skills
 
-def has_dev_waiver(ledger_path):
-    """True only for a real entry in the waivers: list whose text mentions
-    dev/batch/epic — parsed, not sniffed from the whole file."""
-    try:
-        import yaml
-        led = yaml.safe_load(open(ledger_path, encoding="utf-8", errors="replace")) or {}
-        entries = [str(w).lower() for w in (led.get("waivers") or [])]
-    except Exception:
-        # no PyYAML: collect the lines of the waivers: block only
-        entries, inside = [], False
-        for line in open(ledger_path, encoding="utf-8", errors="replace"):
-            if re.match(r"^waivers:\s*(#.*)?$", line):
-                inside = True
-                continue
-            if inside and re.match(r"^\S", line):  # next top-level key
-                inside = False
-            if inside and (line.strip().startswith("-") or line.startswith(" ")):
-                entries.append(line.lower())
-        entries = ["".join(entries)] if entries else []
-    return any(re.search(r"dev|batch|epic", e) for e in entries)
+def evaluate(data):
+    if data.get("tool_name") not in ("Agent", "Task"):
+        return 0
+    project = Path(data.get("cwd") or Path.cwd()).resolve()
+    for candidate in (project, *project.parents):
+        if (candidate / gate.STATE / "ledger.json").is_file():
+            project = candidate
+            break
+    else:
+        return 0
+    ti = data.get("tool_input", {})
+    kind = ti.get("subagent_type", "")
+    text = str(ti.get("prompt", "")) + " " + str(ti.get("description", ""))
+    mentioned = set(re.findall(r"\bbmad-[a-z][a-z-]+\b", text))
+    managed = kind.startswith("bmad-") or bool(mentioned) or "BMAD_TICKET:" in text or "BMAD_PARENT_TICKET:" in text
+    if not managed:
+        return 0
+    parent_matches = re.findall(r"\bBMAD_PARENT_TICKET:([a-f0-9]{32})\b", text)
+    if parent_matches:
+        gate.need(kind not in TYPES and "BMAD_TICKET:" not in text and len(set(parent_matches)) == 1,
+                  "Native substeps need one parent ticket and the native workflow's actual role")
+        _, attempt = gate.check_ticket(project, gate.Store(project).read(), parent_matches[0])
+        gate.need(attempt["workflow"] in ("bmad-build", "bmad-code-review"), "This workflow has no managed native substep route")
+        gate.need(attempt["workflow"] in mentioned, "Native substep must name its parent workflow")
+        return 0
+    gate.need(kind in TYPES, "Use installed bmad-worker/reviewer/planner/researcher for managed BMAD work")
+    matches = re.findall(r"\bBMAD_TICKET:([a-f0-9]{32})\b", text)
+    if TYPES[kind] == "plan" and not (mentioned & set.union(*gate.PHASE_WORKFLOWS.values())):
+        return 0
+    gate.need(len(set(matches)) == 1, "Managed dev/review needs exactly one BMAD_TICKET from gate.py start")
+    _, attempt = gate.check_ticket(project, gate.Store(project).read(), matches[0])
+    gate.need(TYPES[kind] == attempt["phase"], "Agent role does not match ticket phase")
+    gate.need(attempt["workflow"] in mentioned, "Brief must name the ticket's exact BMAD workflow")
+    return 0
 
-def impl_dir(r):
-    """implementation_artifacts dir from _bmad/*/config.yaml, default fallback."""
-    for mod in ("bmm", "core", "gds", "cis"):
-        p = os.path.join(r, "_bmad", mod, "config.yaml")
-        if not os.path.exists(p):
-            continue
-        m = re.search(r"^\s*implementation_artifacts:\s*(.+)$",
-                      open(p, encoding="utf-8", errors="replace").read(), re.M)
-        if m:
-            v = m.group(1).strip().strip("'\"").replace("{project-root}", r)
-            return v if os.path.isabs(v) else os.path.join(r, v)
-    return os.path.join(r, "_bmad-output", "implementation-artifacts")
 
 def main():
     try:
         data = json.load(sys.stdin)
-    except Exception:
-        return 0
-    if data.get("tool_name") not in ("Agent", "Task"):
-        return 0
-    ti = data.get("tool_input") or {}
-    text = " ".join(str(ti.get(k, "")) for k in ("prompt", "description")).lower()
-    if "bmad-" not in text:
-        return 0
-
-    # only enforce inside a BMAD project
-    cwd = data.get("cwd") or os.getcwd()
-    r = cwd
-    while r != "/" and not os.path.isdir(os.path.join(r, "_bmad")):
-        r = os.path.dirname(r)
-    if r == "/":
-        return 0
-
-    atype = (ti.get("subagent_type") or "").lower()
-    mentioned = set(re.findall(r"bmad-[a-z][a-z-]*[a-z]", text))
-    phase = phase_skills(r)
-
-    # --- rule 1: typed agents for BMAD phase work -------------------------------
-    # An EMPTY subagent_type also fails: the Agent tool defaults to
-    # general-purpose, which is exactly what this rule exists to stop.
-    for skill in sorted(mentioned & phase):
-        if not atype.startswith("bmad-"):
-            print(f"BLOCKED by bmad-agent-gate: '{skill}' work must run on a typed BMAD "
-                  f"subagent (suggested: subagent_type='{suggest_agent(skill)}'), "
-                  f"not '{atype or 'the default general-purpose'}'. "
-                  "Re-spawn with the typed agent.", file=sys.stderr)
-            return 2
-
-    # --- rule 2: dev workflow needs a story file (or explicit waiver) -----------
-    if mentioned & DEV_SKILLS:
-        # waiver recorded? Only an actual ENTRY under waivers: counts — the
-        # old whole-file substring sniff let an empty `waivers: []` plus any
-        # skip reason containing "dev" bypass the gate.
-        for lp in glob.glob(os.path.join(r, "*", "gate-ledger.yaml")) + \
-                  glob.glob(os.path.join(r, "_bmad-output", "gate-ledger.yaml")):
-            if has_dev_waiver(lp):
-                return 0
-        # any .md path mentioned in the prompt that exists on disk?
-        for m in re.finditer(r"[\w./ _-]+\.md", str(ti.get("prompt", ""))):
-            p = m.group(0).strip()
-            full = p if os.path.isabs(p) else os.path.join(r, p)
-            # \b keeps "history.md" from counting as story evidence
-            if os.path.exists(full) and (impl_dir(r) in full
-                                         or re.search(r"\bstor(y|ies)\b", full.lower())
-                                         or "_bmad-output" in full):
-                return 0
-        # or does any story file exist at the tracked story location?
-        base = impl_dir(r)
-        if glob.glob(os.path.join(base, "**", "stories", "*.md"), recursive=True) or \
-           glob.glob(os.path.join(base, "*-*.md")):
-            return 0
-        dev = sorted(mentioned & DEV_SKILLS)[0]
-        print(f"BLOCKED by bmad-agent-gate: {dev} spawn but no story file exists "
-              "on disk and none is referenced in the prompt. Run bmad-create-story (+ "
-              "validate) first, pass the story file path in the prompt, or record a "
-              "user waiver: gate.py waive 'epic-batch-dev' --reason '...'.",
-              file=sys.stderr)
+        gate.need(isinstance(data, dict), "Hook input must be an object")
+        return evaluate(data)
+    except (gate.GateError, OSError, ValueError, TypeError, KeyError) as e:
+        print(f"BLOCKED by BMAD v4: {e}", file=sys.stderr)
         return 2
-    return 0
+
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception:
-        sys.exit(0)  # fail-open
+    sys.exit(main())
